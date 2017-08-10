@@ -75,7 +75,6 @@ func TestTransactionInterrupted(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-
 	// Create a transaction with 1 update
 	updates := []Update{}
 	updates = append(updates, Update{
@@ -83,12 +82,24 @@ func TestTransactionInterrupted(t *testing.T) {
 		Version:      "1.0",
 		Instructions: fastrand.Bytes(1234),
 	})
+	// Create one transaction which will be committed and one that will be applied
 	txn := wt.wal.NewTransaction(updates)
+	txn2 := wt.wal.NewTransaction(updates)
 
-	// wait for the update to be committed
+	// wait for the transactions to be committed
 	wait := txn.SignalSetupComplete()
 	if err := <-wait; err != nil {
-		t.Errorf("SignalSetupComplete failed %v", err)
+		t.Errorf("SignalSetupComplete for the first transaction failed %v", err)
+	}
+	wait2 := txn2.SignalSetupComplete()
+	if err := <-wait2; err != nil {
+		t.Errorf("SignalSetupComplete for the second transaction failed")
+	}
+
+	// release the changes of the second transaction
+	wait2 = txn2.SignalApplyComplete()
+	if err := <-wait2; err != nil {
+		t.Errorf("SignalApplyComplete for the second transaction failed")
 	}
 
 	// Shutdown the wal without releasing the changes
@@ -102,7 +113,7 @@ func TestTransactionInterrupted(t *testing.T) {
 		t.Errorf("wal was deleted at %v", wt.logpath)
 	}
 
-	// Restart it and check if exactly 1 unfinished update is reported
+	// Restart it and check if exactly 1 unfinished transaction is reported
 	cancel2 := make(chan struct{})
 	updates2, _, err := New(wt.logpath, wt.wal.log, cancel2, make(chan struct{}), make(map[string]bool))
 	if err != nil {

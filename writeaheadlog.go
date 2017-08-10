@@ -6,6 +6,7 @@ package wal
 import (
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"sync"
 
@@ -188,13 +189,15 @@ func (w *WAL) recover() ([]Update, error) {
 	var err error
 	for i := 0; err == nil; i++ {
 		// read the page data
-		_, err = w.logFile.ReadAt(pageBytes[:], int64(i)*pageSize)
+		offset := int64(i) * pageSize
+		_, err = w.logFile.ReadAt(pageBytes[:], offset)
 		if err != nil {
 			continue
 		}
 
 		// unmarshall the page
 		var currentPage page
+		currentPage.offset = uint64(offset)
 		nextPage, err := currentPage.Unmarshal(pageBytes[:])
 		if err != nil {
 			continue
@@ -202,7 +205,9 @@ func (w *WAL) recover() ([]Update, error) {
 
 		// remember the value of nextPage so we can link pages back together later
 		// if the next page equals MaxUint64 there is no next page
-		previousPages[nextPage] = currentPage
+		if nextPage != math.MaxUint64 {
+			previousPages[nextPage] = currentPage
+		}
 
 		pages = append(pages, currentPage)
 	}
@@ -214,13 +219,10 @@ func (w *WAL) recover() ([]Update, error) {
 	// restore transactions
 	txns, err := w.restoreTransactions(pages, previousPages)
 
-	// filter out corrupted, uncommitted and finished updates
+	// filter out corrupted updates
 	updates := []Update{}
 	for _, txn := range txns {
 		if err := txn.validateChecksum(); err != nil {
-			continue
-		}
-		if txn.firstPage.pageStatus == pageStatusApplied || txn.firstPage.pageStatus == pageStatusWritten {
 			continue
 		}
 		updates = append(updates, txn.Updates...)

@@ -100,7 +100,7 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 		pages := make([]page, requiredPages)
 		for i := uint64(0); i < requiredPages; i++ {
 			// Set offset according to the index in reservedPages
-			pages[i].offset = pageSize * reservedPages[i]
+			pages[i].offset = reservedPages[i]
 
 			// Set nextPage if the current page isn't the last one
 			// otherwise let it be nil
@@ -185,7 +185,7 @@ func (t Transaction) validateChecksum() error {
 }
 
 //commit commits a transaction by setting the correct status and checksum
-func (t Transaction) commit() error {
+func (t *Transaction) commit() error {
 	// set the status of the first page first
 	t.firstPage.pageStatus = pageStatusComitted
 
@@ -230,6 +230,7 @@ func (t *Transaction) SignalApplyComplete() <-chan error {
 		err := t.firstPage.Write(t.wal.logFile)
 		if err != nil {
 			notifyChannel <- build.ExtendErr("Couldn't write the page to file", err)
+			return
 		}
 
 		// Update the wallets available pages
@@ -239,6 +240,7 @@ func (t *Transaction) SignalApplyComplete() <-chan error {
 			t.wal.availablePages = append(t.wal.availablePages, page.offset)
 			page = page.nextPage
 		}
+		notifyChannel <- nil
 	}()
 	return notifyChannel
 }
