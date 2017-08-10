@@ -1,4 +1,4 @@
-package writeaheadlog
+package wal
 
 import (
 	"encoding/json"
@@ -143,11 +143,8 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 			page = page.nextPage
 		}
 
-		// Add transaction to the queue of uncommitted ones
-		t.wal.uncommittedTransactions = append(t.wal.uncommittedTransactions, t)
-
-		// Indicate success
-		notifyChannel <- nil
+		// Commit transaction
+		notifyChannel <- t.commit()
 	}()
 	return notifyChannel
 }
@@ -209,6 +206,8 @@ func (t Transaction) commit() error {
 		return build.ExtendErr("Writing the first page failed", err)
 	}
 
+	t.commitComplete = true
+	t.wal.logFile.Sync()
 	return nil
 }
 

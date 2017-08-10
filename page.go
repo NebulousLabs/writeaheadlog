@@ -1,4 +1,4 @@
-package writeaheadlog
+package wal
 
 import (
 	"bytes"

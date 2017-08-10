@@ -1,4 +1,4 @@
-package writeaheadlog
+package wal
 
 // Update defines a single update that can be sent to the WAL and saved
 // atomically. Updates are sent to the wal in groups of one or more, and upon

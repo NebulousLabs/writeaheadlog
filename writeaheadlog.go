@@ -1,14 +1,13 @@
 // package writeaheadlog defines and implements a general purpose, high performance
 // write-ahead-log for performing ACID transactions to disk without sacrificing
 // speed or latency more than fundamentally required.
-package writeaheadlog
+package wal
 
 import (
 	"encoding/json"
 	"io"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/persist"
@@ -37,9 +36,6 @@ type WAL struct {
 	// logFile contains all of the persistent data associated with the log.
 	logFile *os.File
 
-	// uncommittedTransactions contains transactions that are ready to be committed
-	uncommittedTransactions []*Transaction
-
 	// Utilities
 	settings map[string]bool
 	log      *persist.Logger
@@ -56,7 +52,7 @@ type WAL struct {
 // simulating multiple consecutive unclean shutdowns. If the updates are
 // properly idempotent, there should be no functional difference between the
 // multiple appearances and them just being loaded a single time correctly.
-func New(path string, logger *persist.Logger, cancel <-chan struct{}, syncLoopStopped chan struct{}, settings map[string]bool) (u []Update, w *WAL, err error) {
+func New(path string, logger *persist.Logger, cancel <-chan struct{}, walStopped chan struct{}, settings map[string]bool) (u []Update, w *WAL, err error) {
 	// Create a new WAL
 	newWal := WAL{
 		availablePages:     []uint64{},
@@ -66,13 +62,6 @@ func New(path string, logger *persist.Logger, cancel <-chan struct{}, syncLoopSt
 		log:                logger,
 		settings:           settings,
 	}
-
-	// Start the sync loop if there were no errors
-	defer func() {
-		if err == nil {
-			go newWal.threadedSyncLoop(path, cancel, syncLoopStopped)
-		}
-	}()
 
 	// Try opening the WAL file.
 	newWal.logFile, err = os.OpenFile(path, os.O_RDWR, 0600)
@@ -96,6 +85,17 @@ func New(path string, logger *persist.Logger, cancel <-chan struct{}, syncLoopSt
 		return nil, nil, build.ExtendErr("walFile could not be created", err)
 	}
 
+	// If there were no errors prepare clean shutdown
+	go func() {
+		select {
+		case <-cancel:
+		}
+		w.logFile.Close()
+		if !w.settings["cleanWALFile"] {
+			os.Remove(path)
+		}
+		close(walStopped)
+	}()
 	return nil, &newWal, nil
 }
 
@@ -114,36 +114,6 @@ func (w *WAL) NewTransaction(updates []Update) *Transaction {
 	return &newTransaction
 }
 
-// threadedSyncLoop commits all uncommitted transactions
-func (w *WAL) threadedSyncLoop(walPath string, cancel <-chan struct{}, syncLoopStopped chan struct{}) {
-	var shutdown bool = false
-	for {
-		select {
-		case <-cancel:
-			// shutdown after one more iteration
-			shutdown = true
-		case <-time.After(syncLoopInterval):
-		}
-		w.mu.Lock()
-		// commit all transactions that are ready
-		for _, txn := range w.uncommittedTransactions {
-			txn.commit()
-		}
-		w.logFile.Sync()
-		w.mu.Unlock()
-
-		// shutdown
-		if shutdown {
-			w.logFile.Close()
-			if !w.settings["cleanWALFile"] {
-				os.Remove(walPath)
-			}
-			close(syncLoopStopped)
-			return
-		}
-	}
-}
-
 // restoreTransactions restores the transactions contained in a WAL from its pages
 // and a dictionary which maps each page to the next one
 func (w *WAL) restoreTransactions(pages []page, previousPages map[uint64]page) ([]Transaction, error) {
@@ -151,7 +121,8 @@ func (w *WAL) restoreTransactions(pages []page, previousPages map[uint64]page) (
 	// Link all pages to their predecessors
 	for _, page := range pages {
 		previousPage, exists := previousPages[page.offset]
-		if !exists && page.pageStatus != pageStatusOther {
+		// ignore pages that were not yet committed or were already released
+		if !exists && page.pageStatus == pageStatusComitted {
 			// The page seems to be a firstPage. Remember it.
 			firstPages = append(firstPages, page)
 		} else if exists {
@@ -200,19 +171,9 @@ func (w *WAL) restoreTransactions(pages []page, previousPages map[uint64]page) (
 			panic("sanity check failed. firstPage doesn't lead to finalPage")
 		}
 
-		// set the progress according to the pageStatus
-		switch currentPage.pageStatus {
-		case pageStatusApplied:
-			txn.releaseComplete = true
-			fallthrough
-		case pageStatusComitted:
-			txn.commitComplete = true
-			fallthrough
-		case pageStatusWritten:
-			txn.setupComplete = true
-		default:
-			// TODO shouldn't happen
-		}
+		// set the progress accordingly
+		txn.commitComplete = true
+		txn.setupComplete = true
 		txns = append(txns, txn)
 	}
 	return txns, nil

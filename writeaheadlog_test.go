@@ -1,4 +1,4 @@
-package writeaheadlog
+package wal
 
 import (
 	"bytes"
@@ -24,7 +24,7 @@ type walTester struct {
 }
 
 // newContractManagerTester returns a ready-to-rock contract manager tester.
-func newWALTester(name string, cancel <-chan struct{}, syncLoopStopped chan struct{}, settings map[string]bool) (*walTester, error) {
+func newWALTester(name string, cancel <-chan struct{}, walStopped chan struct{}, settings map[string]bool) (*walTester, error) {
 	if testing.Short() {
 		panic("use of newContractManagerTester during short testing")
 	}
@@ -41,7 +41,7 @@ func newWALTester(name string, cancel <-chan struct{}, syncLoopStopped chan stru
 	log := persist.NewLogger(&buf)
 
 	logpath := filepath.Join(testdir, "log.wal")
-	updates, wal, err := New(logpath, log, cancel, syncLoopStopped, settings)
+	updates, wal, err := New(logpath, log, cancel, walStopped, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -67,11 +67,11 @@ func TransactionPages(txn *Transaction) (pages []page) {
 // transaction is handled correctly upon reboot
 func TestTransactionInterrupted(t *testing.T) {
 	cancel := make(chan struct{})
-	syncLoopStopped := make(chan struct{})
+	walStopped := make(chan struct{})
 
 	settings := make(map[string]bool)
 	settings["cleanWALFile"] = true
-	wt, err := newWALTester(t.Name(), cancel, syncLoopStopped, settings)
+	wt, err := newWALTester(t.Name(), cancel, walStopped, settings)
 	if err != nil {
 		t.Error(err)
 	}
@@ -94,7 +94,7 @@ func TestTransactionInterrupted(t *testing.T) {
 	// Shutdown the wal without releasing the changes
 	cancel <- struct{}{}
 	select {
-	case <-syncLoopStopped:
+	case <-walStopped:
 	}
 
 	// make sure the wal is still there
