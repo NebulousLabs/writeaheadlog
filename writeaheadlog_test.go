@@ -126,6 +126,88 @@ func TestTransactionInterrupted(t *testing.T) {
 	}
 }
 
+// TestWalParallel checks if the wal still works without errors under a high load parallel work
+// The wal won't be deleted but reloaded instead to check if the amount of returned failed updates
+// equals 0
+func TestWalParallel(t *testing.T) {
+	cancel := make(chan struct{})
+	settings := make(map[string]bool)
+	settings["cleanWALFile"] = true
+	walStopped := make(chan struct{})
+	wt, err := newWALTester(t.Name(), cancel, walStopped, settings)
+	if err != nil {
+		t.Error(err)
+	}
+
+	// Prepare a random update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Define a function that creates a transaction from this update and applies it
+	done := make(chan error)
+	f := func() {
+		// Create txn
+		txn := wt.wal.NewTransaction(updates)
+		// Wait for the txn to be committed
+		if err := <-txn.SignalSetupComplete(); err != nil {
+			done <- err
+			return
+		}
+		if err := <-txn.SignalApplyComplete(); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}
+
+	// Create numThreads instances of the function and wait for it to complete without error
+	numThreads := 10000
+	for i := 0; i < numThreads; i++ {
+		go f()
+	}
+	for i := 0; i < numThreads; i++ {
+		err := <-done
+		if err != nil {
+			t.Errorf("Thread %v failed: %v", i, err)
+		}
+	}
+
+	// The number of available pages should equal the number of created pages
+	if wt.wal.filePageCount != uint64(len(wt.wal.availablePages)) {
+		t.Errorf("number of available pages doesn't match the number of created ones. Expected %v, but was %v",
+			wt.wal.availablePages, wt.wal.filePageCount)
+	}
+
+	// shutdown the wal
+	close(cancel)
+	<-walStopped
+
+	// Get the fileinfo
+	fi, err := os.Stat(wt.logpath)
+	if os.IsNotExist(err) {
+		t.Errorf("wal was deleted but shouldn't have")
+	}
+
+	// Log some stats about the file
+	t.Logf("filesize: %v bytes", fi.Size())
+	t.Logf("used pages: %v", wt.wal.filePageCount)
+
+	// Restart it and check that no unfinished transactions are reported
+	cancel2 := make(chan struct{})
+	updates2, _, err := New(wt.logpath, wt.wal.log, cancel2, make(chan struct{}), make(map[string]bool))
+	if err != nil {
+		t.Error(err)
+	}
+	if len(updates2) != 0 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
+	}
+}
+
 // TestRestoreTransactions checks that restoring transactions from a WAL works correctly
 func TestRestoreTransactions(t *testing.T) {
 	cancel := make(chan struct{})
