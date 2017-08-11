@@ -208,6 +208,71 @@ func TestWalParallel(t *testing.T) {
 	}
 }
 
+// TestPageRecycling checks if pages are actually freed and used again after a transaction was applied
+func TestPageRecycling(t *testing.T) {
+	cancel := make(chan struct{})
+	walStopped := make(chan struct{})
+	wt, err := newWALTester(t.Name(), cancel, walStopped, make(map[string]bool))
+	if err != nil {
+		t.Error(err)
+	}
+
+	// Prepare a random update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create txn
+	txn := wt.wal.NewTransaction(updates)
+	// Wait for the txn to be committed
+	if err := <-txn.SignalSetupComplete(); err != nil {
+		t.Errorf("SignalSetupComplete failed: %v", err)
+	}
+
+	// There should be no available pages before the transaction was applied
+	if len(wt.wal.availablePages) != 0 {
+		t.Errorf("Number of available pages should be 0 but was %v", len(wt.wal.availablePages))
+	}
+
+	if err := <-txn.SignalApplyComplete(); err != nil {
+		t.Errorf("SignalApplyComplete failed: %v", err)
+	}
+
+	usedPages := wt.wal.filePageCount
+	availablePages := len(wt.wal.availablePages)
+	// The number of used pages should be greater than 0
+	if usedPages == 0 {
+		t.Errorf("The number of used pages should be greater than 0")
+	}
+	// Make sure usedPages equals availablePages and remember the values
+	if usedPages != uint64(availablePages) {
+		t.Errorf("number of used pages doesn't match number of available pages")
+	}
+
+	// Create second txn
+	txn2 := wt.wal.NewTransaction(updates)
+	// Wait for the txn to be committed
+	if err := <-txn2.SignalSetupComplete(); err != nil {
+		t.Errorf("SignalSetupComplete failed: %v", err)
+	}
+	// There should be no available pages before the transaction was applied
+	if len(wt.wal.availablePages) != 0 {
+		t.Errorf("Number of available pages should be 0 but was %v", len(wt.wal.availablePages))
+	}
+	if err := <-txn2.SignalApplyComplete(); err != nil {
+		t.Errorf("SignalApplyComplete failed: %v", err)
+	}
+
+	// The number of used pages shouldn't have increased and still be equal to the number of available ones
+	if wt.wal.filePageCount != usedPages || len(wt.wal.availablePages) != availablePages {
+		t.Errorf("expected used pages %v, was %v", usedPages, wt.wal.filePageCount)
+		t.Errorf("expected available pages %v, was %v", availablePages, len(wt.wal.availablePages))
+	}
+}
+
 // TestRestoreTransactions checks that restoring transactions from a WAL works correctly
 func TestRestoreTransactions(t *testing.T) {
 	cancel := make(chan struct{})
