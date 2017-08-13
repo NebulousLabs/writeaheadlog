@@ -19,12 +19,25 @@ import (
 type walTester struct {
 	wal *WAL
 
-	updates []Update
-	logpath string
+	updates    []Update
+	logpath    string
+	walStopped chan struct{}
+	cancel     chan struct{}
+}
+
+// Close is a helper function for a clean tester shutdown
+func (wt *walTester) Close() {
+	// Signal the wal to stop
+	close(wt.cancel)
+
+	// Wait for the wal to shutdown
+	select {
+	case <-wt.walStopped:
+	}
 }
 
 // newContractManagerTester returns a ready-to-rock contract manager tester.
-func newWALTester(name string, cancel <-chan struct{}, walStopped chan struct{}, settings map[string]bool) (*walTester, error) {
+func newWALTester(name string, settings map[string]bool) (*walTester, error) {
 	if testing.Short() {
 		panic("use of newContractManagerTester during short testing")
 	}
@@ -41,14 +54,18 @@ func newWALTester(name string, cancel <-chan struct{}, walStopped chan struct{},
 	log := persist.NewLogger(&buf)
 
 	logpath := filepath.Join(testdir, "log.wal")
+	walStopped := make(chan struct{})
+	cancel := make(chan struct{})
 	updates, wal, err := New(logpath, log, cancel, walStopped, settings)
 	if err != nil {
 		return nil, err
 	}
 	cmt := &walTester{
-		wal:     wal,
-		logpath: logpath,
-		updates: updates,
+		wal:        wal,
+		logpath:    logpath,
+		updates:    updates,
+		walStopped: walStopped,
+		cancel:     cancel,
 	}
 	return cmt, nil
 }
@@ -66,12 +83,9 @@ func TransactionPages(txn *Transaction) (pages []page) {
 // TestTransactionInterrupted checks if an interrupt between committing and releasing a
 // transaction is handled correctly upon reboot
 func TestTransactionInterrupted(t *testing.T) {
-	cancel := make(chan struct{})
-	walStopped := make(chan struct{})
-
 	settings := make(map[string]bool)
 	settings["cleanWALFile"] = true
-	wt, err := newWALTester(t.Name(), cancel, walStopped, settings)
+	wt, err := newWALTester(t.Name(), settings)
 	if err != nil {
 		t.Error(err)
 	}
@@ -102,11 +116,8 @@ func TestTransactionInterrupted(t *testing.T) {
 		t.Errorf("SignalApplyComplete for the second transaction failed")
 	}
 
-	// Shutdown the wal without releasing the changes
-	cancel <- struct{}{}
-	select {
-	case <-walStopped:
-	}
+	// shutdown the wal
+	wt.Close()
 
 	// make sure the wal is still there
 	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
@@ -134,7 +145,7 @@ func TestWalParallel(t *testing.T) {
 	settings := make(map[string]bool)
 	settings["cleanWALFile"] = true
 	walStopped := make(chan struct{})
-	wt, err := newWALTester(t.Name(), cancel, walStopped, settings)
+	wt, err := newWALTester(t.Name(), settings)
 	if err != nil {
 		t.Error(err)
 	}
@@ -193,7 +204,7 @@ func TestWalParallel(t *testing.T) {
 	}
 
 	// Log some stats about the file
-	t.Logf("filesize: %v bytes", fi.Size())
+	t.Logf("filesize: %v mb", float64(fi.Size())/float64(1e+6))
 	t.Logf("used pages: %v", wt.wal.filePageCount)
 
 	// Restart it and check that no unfinished transactions are reported
@@ -210,9 +221,7 @@ func TestWalParallel(t *testing.T) {
 
 // TestPageRecycling checks if pages are actually freed and used again after a transaction was applied
 func TestPageRecycling(t *testing.T) {
-	cancel := make(chan struct{})
-	walStopped := make(chan struct{})
-	wt, err := newWALTester(t.Name(), cancel, walStopped, make(map[string]bool))
+	wt, err := newWALTester(t.Name(), make(map[string]bool))
 	if err != nil {
 		t.Error(err)
 	}
@@ -222,7 +231,7 @@ func TestPageRecycling(t *testing.T) {
 	updates = append(updates, Update{
 		Name:         "test",
 		Version:      "1.0",
-		Instructions: fastrand.Bytes(1234),
+		Instructions: fastrand.Bytes(5000),
 	})
 
 	// Create txn
@@ -276,7 +285,7 @@ func TestPageRecycling(t *testing.T) {
 // TestRestoreTransactions checks that restoring transactions from a WAL works correctly
 func TestRestoreTransactions(t *testing.T) {
 	cancel := make(chan struct{})
-	wt, err := newWALTester(t.Name(), cancel, make(chan struct{}), make(map[string]bool))
+	wt, err := newWALTester(t.Name(), make(map[string]bool))
 	if err != nil {
 		t.Error(err)
 	}
