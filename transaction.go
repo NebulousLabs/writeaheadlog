@@ -51,7 +51,7 @@ type Transaction struct {
 	wal *WAL
 }
 
-// signalSetupComplete will signal to the WAL that any required setup has
+// SignalSetupComplete will signal to the WAL that any required setup has
 // completed, and that the WAL can safely commit to the transaction being
 // applied atomically.
 func (t *Transaction) SignalSetupComplete() <-chan error {
@@ -179,7 +179,7 @@ func (t Transaction) validateChecksum() error {
 		return errors.New("Failed to create checksum for validation")
 	}
 	if checksum != t.finalPage.transactionChecksum {
-		return errors.New("Checksum not valid.")
+		return errors.New("checksum not valid")
 	}
 	return nil
 }
@@ -211,7 +211,7 @@ func (t *Transaction) commit() error {
 	return nil
 }
 
-// signalReleaseComplete informs the WAL that it is safe to free the used pages to reuse them in a new transaction
+// SignalApplyComplete  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
 func (t *Transaction) SignalApplyComplete() <-chan error {
 	if !t.setupComplete || !t.commitComplete || t.releaseComplete {
 		panic("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")

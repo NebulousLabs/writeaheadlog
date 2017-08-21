@@ -71,7 +71,7 @@ func newWALTester(name string, settings map[string]bool) (*walTester, error) {
 }
 
 // getTransactionPages is
-func TransactionPages(txn *Transaction) (pages []page) {
+func transactionPages(txn *Transaction) (pages []page) {
 	page := txn.firstPage
 	for page != nil {
 		pages = append(pages, *page)
@@ -284,7 +284,6 @@ func TestPageRecycling(t *testing.T) {
 
 // TestRestoreTransactions checks that restoring transactions from a WAL works correctly
 func TestRestoreTransactions(t *testing.T) {
-	cancel := make(chan struct{})
 	wt, err := newWALTester(t.Name(), make(map[string]bool))
 	if err != nil {
 		t.Error(err)
@@ -310,7 +309,7 @@ func TestRestoreTransactions(t *testing.T) {
 		}
 
 		// Check that 2 pages were created
-		pages := TransactionPages(txn)
+		pages := transactionPages(txn)
 		if len(pages) != 2 {
 			t.Errorf("Txn has wrong size. Expected %v but was %v", 2, len(pages))
 		}
@@ -345,15 +344,15 @@ func TestRestoreTransactions(t *testing.T) {
 		}
 		if txn.firstPage.pageStatus != txns[i].firstPage.pageStatus {
 			t.Errorf("%v: The pageStatus of the txn is %v but should be",
-				i, txn.firstPage.pageStatus, txns[i].firstPage.pageStatus)
+				txn.firstPage.pageStatus, txns[i].firstPage.pageStatus)
 		}
 		if txn.finalPage.transactionNumber != txns[i].finalPage.transactionNumber {
 			t.Errorf("%v: The transactionNumber of the txn is %v but should be",
-				i, txn.finalPage.transactionNumber, txns[i].finalPage.transactionNumber)
+				txn.finalPage.transactionNumber, txns[i].finalPage.transactionNumber)
 		}
 		if txn.finalPage.transactionChecksum != txns[i].finalPage.transactionChecksum {
 			t.Errorf("%v: The transactionChecksum of the txn is %v but should be",
-				i, txn.finalPage.transactionChecksum, txns[i].finalPage.transactionChecksum)
+				txn.finalPage.transactionChecksum, txns[i].finalPage.transactionChecksum)
 		}
 	}
 
@@ -393,7 +392,7 @@ func TestRestoreTransactions(t *testing.T) {
 	}
 
 	// shutdown the wal
-	close(cancel)
+	close(wt.cancel)
 	time.Sleep(time.Second)
 
 	// make sure the wal is gone
