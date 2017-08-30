@@ -8,6 +8,38 @@ import (
 	"github.com/NebulousLabs/errors"
 )
 
+// Update defines a single update that can be sent to the WAL and saved
+// atomically. Updates are sent to the wal in groups of one or more, and upon
+// being signaled, will be saved to disk in a high-integrity, all- or-nothing
+// fasion that follows ACID principles.
+//
+// The name and version are optional, however best-practice code will make use
+// of these fields.
+//
+// When using the Update, it recommended that you typecast the Update type to
+// another type which has methods on it for creating and applying the Update +
+// instructions, including any special handling based on the version.
+type Update struct {
+	// The name of the update type. When the WAL is loaded after an unclean
+	// shutdown, any un-committed changes will be passed as Updates back to the
+	// caller instantiating the WAL. The caller should determine what code to
+	// run on the the update based on the name and version.
+	Name string
+
+	// The version of the update type. Update types and implementations can be
+	// tweaked over time, and a version field allows for easy compatibility
+	// between releases, even if an upgrade occurs between an unclean shutdown
+	// and a reload.
+	Version string
+
+	// The marshalled data directing the update. The data is an opaque set of
+	// instructions to follow that implement and idempotent change to a set of
+	// persistent files. A series of unclean shutdowns in rapid succession could
+	// mean that these instructions get followed multiple times, which means
+	// idempotent instructions are required.
+	Instructions []byte
+}
+
 // Transaction defines a series of updates that are to be performed atomically.
 // In the event of an unclean shutdown, either all updates will have been saved
 // together at full integrity, or none of the updates in the transaction will
@@ -152,11 +184,15 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 // MarshalJSON marshales a transaction.
 func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
 	page := t.firstPage
+
+	// Backup the existing checksum and replace it with zeros
+	checksumBackup := t.firstPage.transactionChecksum
+	var zeroHash [crypto.HashSize]byte
+	page.transactionChecksum = zeroHash
+
+	// Marshall all the pages and calculate the checksum
 	var data []byte
 	for page != nil {
-		// make sure that the checksum field is just zeros before calculating the checksum
-		copy(page.transactionChecksum[:], make([]byte, crypto.HashSize))
-
 		bytes, err := page.Marshal()
 		if err != nil {
 			return [crypto.HashSize]byte{}, build.ExtendErr("Failed to marshall page", err)
@@ -164,6 +200,9 @@ func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
 		data = append(data, bytes...)
 		page = page.nextPage
 	}
+
+	// Restore the previous checksum of the first page
+	t.firstPage.transactionChecksum = checksumBackup
 	return crypto.HashBytes(data), nil
 }
 
@@ -171,14 +210,14 @@ func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
 // and comparing it to the one in the finalPage of the transaction
 func (t Transaction) validateChecksum() error {
 	// Check if finalPage is set
-	if t.finalPage == nil {
-		return errors.New("Couldn't verify checksum. finalPage is nil")
+	if t.firstPage == nil {
+		return errors.New("Couldn't verify checksum. firstPage is nil")
 	}
 	checksum, err := t.checksum()
 	if err != nil {
 		return errors.New("Failed to create checksum for validation")
 	}
-	if checksum != t.finalPage.transactionChecksum {
+	if checksum != t.firstPage.transactionChecksum {
 		return errors.New("checksum not valid")
 	}
 	return nil
@@ -189,16 +228,12 @@ func (t *Transaction) commit() error {
 	// set the status of the first page first
 	t.firstPage.pageStatus = pageStatusComitted
 
-	// calculate the checksum and write it to the last page
+	// calculate the checksum and write it to the first page
 	checksum, err := t.checksum()
 	if err != nil {
 		return build.ExtendErr("Unable to create checksum of transaction", err)
 	}
-	t.finalPage.transactionChecksum = checksum
-	err = t.finalPage.Write(t.wal.logFile)
-	if err != nil {
-		return build.ExtendErr("Writing the final page failed", err)
-	}
+	t.firstPage.transactionChecksum = checksum
 
 	// Finalize the commit by writing the first page with the updated status
 	err = t.firstPage.Write(t.wal.logFile)

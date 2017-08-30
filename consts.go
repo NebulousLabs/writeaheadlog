@@ -9,8 +9,9 @@ const (
 )
 
 const (
-	pageStatusOther    = 0
-	pageStatusWritten  = 1
-	pageStatusComitted = 2
-	pageStatusApplied  = 3
+	pageStatusInvalid  = 0
+	pageStatusOther    = 1
+	pageStatusWritten  = 2
+	pageStatusComitted = 3
+	pageStatusApplied  = 4
 )

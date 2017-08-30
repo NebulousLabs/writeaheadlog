@@ -5,13 +5,16 @@ package wal
 
 import (
 	"encoding/json"
+	"encoding/binary"
 	"io"
 	"math"
 	"os"
 	"sync"
+	"bytes"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/persist"
+	"github.com/NebulousLabs/errors"
 )
 
 // WAL is a general purpose, high performance write-ahead-log for performing
@@ -122,6 +125,10 @@ func (w *WAL) restoreTransactions(pages []page, previousPages map[uint64]page) (
 	// Link all pages to their predecessors
 	for _, page := range pages {
 		previousPage, exists := previousPages[page.offset]
+		if page.pageStatus == pageStatusInvalid {
+			// Sanity check. Pages shouldn't be saved with pageStatusInvalid
+			panic(errors.New("Page was not initialized correctly"))
+		}
 		// ignore pages that were not yet committed or were already released
 		if !exists && page.pageStatus == pageStatusComitted {
 			// The page seems to be a firstPage. Remember it.
@@ -180,6 +187,33 @@ func (w *WAL) restoreTransactions(pages []page, previousPages map[uint64]page) (
 	return txns, nil
 }
 
+// UnmarshalPage is a helper function that unmarshals the page and returns the offset of the next one
+// Note: setting offset and validating the checksum needs to be handled by the caller
+func unmarshalPage(p *page, b []byte) (nextPage uint64, err error) {
+	buffer := bytes.NewBuffer(b)
+
+	// Read pageStatus, transactionNumber, nextPage and checksum
+	err1 := binary.Read(buffer, binary.LittleEndian, &p.pageStatus)
+	err2 := binary.Read(buffer, binary.LittleEndian, &p.transactionNumber)
+	err3 := binary.Read(buffer, binary.LittleEndian, &nextPage)
+	_, err4 := buffer.Read(p.transactionChecksum[:])
+
+	// Read payloadSize
+	var payloadSize uint64
+	err5 := binary.Read(buffer, binary.LittleEndian, &payloadSize)
+
+	// Read payload
+	p.payload = make([]byte, payloadSize)
+	_, err6 := buffer.Read(p.payload[:])
+
+	// Check for errors
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
+		err = errors.Compose(errors.New("Failed to unmarshal wal page"), err1, err2, err3, err4, err5, err6)
+		return
+	}
+	return
+}
+
 // recover recovers a WAL and returns comitted but not finished updates
 func (w *WAL) recover() ([]Update, error) {
 	// Read pages from the WAL one at a time and load them back into memory.
@@ -198,7 +232,7 @@ func (w *WAL) recover() ([]Update, error) {
 		// unmarshall the page
 		var currentPage page
 		currentPage.offset = uint64(offset)
-		nextPage, err := currentPage.Unmarshal(pageBytes[:])
+		nextPage, err := unmarshalPage(&currentPage, pageBytes[:])
 		if err != nil {
 			continue
 		}
