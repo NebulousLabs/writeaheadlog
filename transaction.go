@@ -2,6 +2,8 @@ package wal
 
 import (
 	"encoding/json"
+	"runtime"
+	"sync/atomic"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
@@ -83,6 +85,117 @@ type Transaction struct {
 	wal *WAL
 }
 
+// MarshalJSON marshales a transaction.
+func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
+	page := t.firstPage
+
+	// Backup the existing checksum and replace it with zeros
+	checksumBackup := t.firstPage.transactionChecksum
+	var zeroHash [crypto.HashSize]byte
+	page.transactionChecksum = zeroHash
+
+	// Marshall all the pages and calculate the checksum
+	var data []byte
+	for page != nil {
+		bytes, err := page.Marshal()
+		if err != nil {
+			return [crypto.HashSize]byte{}, build.ExtendErr("Failed to marshall page", err)
+		}
+		data = append(data, bytes...)
+		page = page.nextPage
+	}
+
+	// Restore the previous checksum of the first page
+	t.firstPage.transactionChecksum = checksumBackup
+	return crypto.HashBytes(data), nil
+}
+
+//commit commits a transaction by setting the correct status and checksum
+func (t *Transaction) commit() error {
+	// set the status of the first page first
+	t.firstPage.pageStatus = pageStatusComitted
+
+	// Set the transaction number of the first page and increase the transactionCounter of the wal
+	t.firstPage.transactionNumber = atomic.AddUint64(&t.wal.atomicNextTransaction, 1) - 1
+
+	// calculate the checksum and write it to the first page
+	checksum, err := t.checksum()
+	if err != nil {
+		return build.ExtendErr("Unable to create checksum of transaction", err)
+	}
+	t.firstPage.transactionChecksum = checksum
+
+	// Wait until it is safe to commit the transaction
+	for atomic.LoadUint64(&t.wal.atomicTransactionCounter) != t.firstPage.transactionNumber {
+		runtime.Gosched()
+	}
+
+	// Finalize the commit by writing the first page with the updated status
+	err = t.firstPage.Write(t.wal.logFile)
+
+	// Increase the transaction counter
+	atomic.AddUint64(&t.wal.atomicTransactionCounter, 1)
+
+	if err != nil {
+		return build.ExtendErr("Writing the first page failed", err)
+	}
+
+	t.commitComplete = true
+	t.wal.logFile.Sync()
+	return nil
+}
+
+// validateChecksum checks if a transaction has been corrupted by computing a hash
+// and comparing it to the one in the finalPage of the transaction
+func (t Transaction) validateChecksum() error {
+	// Check if finalPage is set
+	if t.firstPage == nil {
+		return errors.New("Couldn't verify checksum. firstPage is nil")
+	}
+	checksum, err := t.checksum()
+	if err != nil {
+		return errors.New("Failed to create checksum for validation")
+	}
+	if checksum != t.firstPage.transactionChecksum {
+		return errors.New("checksum not valid")
+	}
+	return nil
+}
+
+// SignalApplyComplete  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
+func (t *Transaction) SignalApplyComplete() <-chan error {
+	if !t.setupComplete || !t.commitComplete || t.releaseComplete {
+		panic("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")
+	}
+	t.releaseComplete = true
+	notifyChannel := make(chan error)
+
+	go func() {
+		t.wal.mu.Lock()
+		defer t.wal.mu.Unlock()
+
+		// Set the page status to applied
+		t.firstPage.pageStatus = pageStatusApplied
+
+		// Write the page to disk
+		err := t.firstPage.Write(t.wal.logFile)
+		if err != nil {
+			notifyChannel <- build.ExtendErr("Couldn't write the page to file", err)
+			return
+		}
+
+		// Update the wallets available pages
+		page := t.firstPage
+		for page != nil {
+			// Append the index of the freed page
+			t.wal.availablePages = append(t.wal.availablePages, page.offset)
+			page = page.nextPage
+		}
+		notifyChannel <- nil
+	}()
+	return notifyChannel
+}
+
 // SignalSetupComplete will signal to the WAL that any required setup has
 // completed, and that the WAL can safely commit to the transaction being
 // applied atomically.
@@ -112,9 +225,11 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 
 		// Check if enough pages are available
 		if uint64(len(t.wal.availablePages)) < requiredPages {
-			// add enough pages for the new transaction
+			// Add enough pages for the new transaction
 			numNewPages := requiredPages - uint64(len(t.wal.availablePages))
-			for i := t.wal.filePageCount; i < t.wal.filePageCount+numNewPages; i++ {
+
+			// Starting at index 1 because the first page is reserved for metadata
+			for i := t.wal.filePageCount + 1; i < t.wal.filePageCount+numNewPages+1; i++ {
 				t.wal.availablePages = append(t.wal.availablePages, i*pageSize)
 			}
 			t.wal.filePageCount += numNewPages
@@ -156,10 +271,6 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 			copy(pages[i].payload, data[i*maxPayloadSize:])
 		}
 
-		// Set the transaction number of the last page and increase the transactionCounter of the wal
-		pages[len(pages)-1].transactionNumber = t.wal.transactionCounter
-		t.wal.transactionCounter++
-
 		// Set the first and final page of the transaction
 		t.firstPage = &pages[0]
 		t.finalPage = &pages[len(pages)-1]
@@ -177,105 +288,6 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 
 		// Commit transaction
 		notifyChannel <- t.commit()
-	}()
-	return notifyChannel
-}
-
-// MarshalJSON marshales a transaction.
-func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
-	page := t.firstPage
-
-	// Backup the existing checksum and replace it with zeros
-	checksumBackup := t.firstPage.transactionChecksum
-	var zeroHash [crypto.HashSize]byte
-	page.transactionChecksum = zeroHash
-
-	// Marshall all the pages and calculate the checksum
-	var data []byte
-	for page != nil {
-		bytes, err := page.Marshal()
-		if err != nil {
-			return [crypto.HashSize]byte{}, build.ExtendErr("Failed to marshall page", err)
-		}
-		data = append(data, bytes...)
-		page = page.nextPage
-	}
-
-	// Restore the previous checksum of the first page
-	t.firstPage.transactionChecksum = checksumBackup
-	return crypto.HashBytes(data), nil
-}
-
-// validateChecksum checks if a transaction has been corrupted by computing a hash
-// and comparing it to the one in the finalPage of the transaction
-func (t Transaction) validateChecksum() error {
-	// Check if finalPage is set
-	if t.firstPage == nil {
-		return errors.New("Couldn't verify checksum. firstPage is nil")
-	}
-	checksum, err := t.checksum()
-	if err != nil {
-		return errors.New("Failed to create checksum for validation")
-	}
-	if checksum != t.firstPage.transactionChecksum {
-		return errors.New("checksum not valid")
-	}
-	return nil
-}
-
-//commit commits a transaction by setting the correct status and checksum
-func (t *Transaction) commit() error {
-	// set the status of the first page first
-	t.firstPage.pageStatus = pageStatusComitted
-
-	// calculate the checksum and write it to the first page
-	checksum, err := t.checksum()
-	if err != nil {
-		return build.ExtendErr("Unable to create checksum of transaction", err)
-	}
-	t.firstPage.transactionChecksum = checksum
-
-	// Finalize the commit by writing the first page with the updated status
-	err = t.firstPage.Write(t.wal.logFile)
-	if err != nil {
-		return build.ExtendErr("Writing the first page failed", err)
-	}
-
-	t.commitComplete = true
-	t.wal.logFile.Sync()
-	return nil
-}
-
-// SignalApplyComplete  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
-func (t *Transaction) SignalApplyComplete() <-chan error {
-	if !t.setupComplete || !t.commitComplete || t.releaseComplete {
-		panic("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")
-	}
-	t.releaseComplete = true
-	notifyChannel := make(chan error)
-
-	go func() {
-		t.wal.mu.Lock()
-		defer t.wal.mu.Unlock()
-
-		// Set the page status to applied
-		t.firstPage.pageStatus = pageStatusApplied
-
-		// Write the page to disk
-		err := t.firstPage.Write(t.wal.logFile)
-		if err != nil {
-			notifyChannel <- build.ExtendErr("Couldn't write the page to file", err)
-			return
-		}
-
-		// Update the wallets available pages
-		page := t.firstPage
-		for page != nil {
-			// Calculate and append the index of the page
-			t.wal.availablePages = append(t.wal.availablePages, page.offset)
-			page = page.nextPage
-		}
-		notifyChannel <- nil
 	}()
 	return notifyChannel
 }

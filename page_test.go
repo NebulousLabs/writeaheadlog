@@ -2,11 +2,11 @@ package wal
 
 import (
 	"bytes"
-	"testing"
 	"runtime"
+	"testing"
 
-	"github.com/NebulousLabs/fastrand"
 	"github.com/NebulousLabs/Sia/crypto"
+	"github.com/NebulousLabs/fastrand"
 )
 
 // TestPageMarshalling checks that pages can be marshalled and unmarshalled correctly
@@ -73,7 +73,7 @@ func BenchmarkPageMarshalling(b *testing.B) {
 	b.ResetTimer()
 
 	// Marshal and unmarshal pagesPerThread pages
-	for i:= 0; i<pages; i++ {
+	for i := 0; i < pages; i++ {
 		marshalledBytes, err := currentPage.Marshal()
 		if err != nil {
 			b.Fatalf("Failed to marshal the page %v", err)
@@ -109,9 +109,9 @@ func BenchmarkPageMarshallingParallel(b *testing.B) {
 	pagesPerThread := 100000 / numThreads
 
 	wait := make(chan struct{})
-	f := func () {
+	f := func() {
 		// Marshal and unmarshal pagesPerThread pages
-		for i:= 0; i<pagesPerThread; i++ {
+		for i := 0; i < pagesPerThread; i++ {
 			marshalledBytes, err := currentPage.Marshal()
 			if err != nil {
 				b.Fatalf("Failed to marshal the page %v", err)
@@ -124,17 +124,17 @@ func BenchmarkPageMarshallingParallel(b *testing.B) {
 			}
 		}
 		// signal the channel when finished
-		wait<- struct{}{}
+		wait <- struct{}{}
 	}
 
 	// Start timer after the test was set up
 	b.ResetTimer()
 
 	// Start the threads and wait for them to finish
-	for i:=0; i<numThreads;i++ {
+	for i := 0; i < numThreads; i++ {
 		go f()
 	}
-	for i:=0; i<numThreads;i++ {
+	for i := 0; i < numThreads; i++ {
 		<-wait
 	}
 }

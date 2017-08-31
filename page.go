@@ -3,13 +3,13 @@ package wal
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
-	"fmt"
 
 	"github.com/NebulousLabs/Sia/build"
-	"github.com/NebulousLabs/errors"
 	"github.com/NebulousLabs/Sia/crypto"
+	"github.com/NebulousLabs/errors"
 )
 
 // page is an on-disk page in the logFile which contains information about

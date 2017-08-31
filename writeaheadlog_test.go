@@ -3,6 +3,7 @@ package wal
 import (
 	"bytes"
 	"encoding/json"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,25 +20,18 @@ import (
 type walTester struct {
 	wal *WAL
 
-	updates    []Update
-	logpath    string
-	walStopped chan struct{}
-	cancel     chan struct{}
+	updates []Update
+	logpath string
 }
 
 // Close is a helper function for a clean tester shutdown
 func (wt *walTester) Close() {
-	// Signal the wal to stop
-	close(wt.cancel)
-
-	// Wait for the wal to shutdown
-	select {
-	case <-wt.walStopped:
-	}
+	// Close wal
+	wt.wal.Close()
 }
 
 // newContractManagerTester returns a ready-to-rock contract manager tester.
-func newWALTester(name string, settings map[string]bool) (*walTester, error) {
+func newWALTester(name string, deps dependencies) (*walTester, error) {
 	if testing.Short() {
 		panic("use of newContractManagerTester during short testing")
 	}
@@ -54,18 +48,14 @@ func newWALTester(name string, settings map[string]bool) (*walTester, error) {
 	log := persist.NewLogger(&buf)
 
 	logpath := filepath.Join(testdir, "log.wal")
-	walStopped := make(chan struct{})
-	cancel := make(chan struct{})
-	updates, wal, err := New(logpath, log, cancel, walStopped, settings)
+	updates, wal, err := newWal(logpath, log, deps)
 	if err != nil {
 		return nil, err
 	}
 	cmt := &walTester{
-		wal:        wal,
-		logpath:    logpath,
-		updates:    updates,
-		walStopped: walStopped,
-		cancel:     cancel,
+		wal:     wal,
+		logpath: logpath,
+		updates: updates,
 	}
 	return cmt, nil
 }
@@ -83,9 +73,7 @@ func transactionPages(txn *Transaction) (pages []page) {
 // TestTransactionInterrupted checks if an interrupt between committing and releasing a
 // transaction is handled correctly upon reboot
 func TestTransactionInterrupted(t *testing.T) {
-	settings := make(map[string]bool)
-	settings["cleanWALFile"] = true
-	wt, err := newWALTester(t.Name(), settings)
+	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -125,11 +113,11 @@ func TestTransactionInterrupted(t *testing.T) {
 	}
 
 	// Restart it and check if exactly 1 unfinished transaction is reported
-	cancel2 := make(chan struct{})
-	updates2, _, err := New(wt.logpath, wt.wal.log, cancel2, make(chan struct{}), make(map[string]bool))
+	updates2, w, err := New(wt.logpath, wt.wal.log)
 	if err != nil {
 		t.Error(err)
 	}
+	defer w.Close()
 
 	if len(updates2) != len(updates) {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
@@ -141,9 +129,7 @@ func TestTransactionInterrupted(t *testing.T) {
 // The wal won't be deleted but reloaded instead to check if the amount of returned failed updates
 // equals 0
 func TestWalParallel(t *testing.T) {
-	settings := make(map[string]bool)
-	settings["cleanWALFile"] = true
-	wt, err := newWALTester(t.Name(), settings)
+	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -192,8 +178,7 @@ func TestWalParallel(t *testing.T) {
 	}
 
 	// shutdown the wal
-	close(wt.cancel)
-	<-wt.walStopped
+	wt.Close()
 
 	// Get the fileinfo
 	fi, err := os.Stat(wt.logpath)
@@ -206,11 +191,12 @@ func TestWalParallel(t *testing.T) {
 	t.Logf("used pages: %v", wt.wal.filePageCount)
 
 	// Restart it and check that no unfinished transactions are reported
-	cancel2 := make(chan struct{})
-	updates2, _, err := New(wt.logpath, wt.wal.log, cancel2, make(chan struct{}), make(map[string]bool))
+	updates2, w, err := New(wt.logpath, wt.wal.log)
 	if err != nil {
 		t.Error(err)
 	}
+	defer w.Close()
+
 	if len(updates2) != 0 {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
 			0, len(updates2))
@@ -219,10 +205,11 @@ func TestWalParallel(t *testing.T) {
 
 // TestPageRecycling checks if pages are actually freed and used again after a transaction was applied
 func TestPageRecycling(t *testing.T) {
-	wt, err := newWALTester(t.Name(), make(map[string]bool))
+	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
+	defer wt.Close()
 
 	// Prepare a random update
 	updates := []Update{}
@@ -282,16 +269,17 @@ func TestPageRecycling(t *testing.T) {
 
 // TestRestoreTransactions checks that restoring transactions from a WAL works correctly
 func TestRestoreTransactions(t *testing.T) {
-	wt, err := newWALTester(t.Name(), make(map[string]bool))
+	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
+	defer wt.Close()
 
 	// Create 10 transactions with 1 update each
 	txns := []Transaction{}
 	totalPages := []page{}
 	totalUpdates := []Update{}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 2; i++ {
 		updates := []Update{}
 		updates = append(updates, Update{
 			Name:         "test",
@@ -299,6 +287,7 @@ func TestRestoreTransactions(t *testing.T) {
 			Instructions: fastrand.Bytes(5000), // ensures that 2 pages will be created
 		})
 		totalUpdates = append(totalUpdates, updates...)
+
 		// Create a new transaction
 		txn := wt.wal.NewTransaction(updates)
 		wait := txn.SignalSetupComplete()
@@ -315,16 +304,21 @@ func TestRestoreTransactions(t *testing.T) {
 		txns = append(txns, *txn)
 	}
 
-	// create a dictionary that takes a page offset and maps it to the page that points to that offset
-	previousPages := make(map[uint64]page)
-	for _, page := range totalPages {
-		if page.nextPage != nil {
-			previousPages[page.nextPage.offset] = page
-		}
+	// restore the transactions
+	recoveredTxns := []Transaction{}
+	logData, err := ioutil.ReadFile(wt.logpath)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// restore the transactions
-	recoveredTxns, err := wt.wal.restoreTransactions(totalPages, previousPages)
+	for _, txn := range txns {
+		var restoredTxn Transaction
+		err := unmarshalTransaction(&restoredTxn, txn.firstPage, txn.firstPage.nextPage.offset, logData)
+		if err != nil {
+			t.Error(err)
+		}
+		recoveredTxns = append(recoveredTxns, restoredTxn)
+	}
 
 	// check if the recovered transactions have the same length as before
 	if len(recoveredTxns) != len(txns) {
@@ -388,24 +382,16 @@ func TestRestoreTransactions(t *testing.T) {
 	if bytes.Compare(originalData, recoveredData) != 0 {
 		t.Errorf("The recovered data doesn't match the original data")
 	}
-
-	// shutdown the wal
-	close(wt.cancel)
-	time.Sleep(time.Second)
-
-	// make sure the wal is gone
-	if _, err := os.Stat(wt.logpath); !os.IsNotExist(err) {
-		t.Error("wal was not deleted after clean shutdown")
-	}
 }
 
 // BenchmarkTransactionSpeed runs for 1 min to find out how many transactions
 // can be applied to the wal and how large the wal grows during that time.
 func BenchmarkTransactionSpeed(b *testing.B) {
-	wt, err := newWALTester(b.Name(), make(map[string]bool))
+	wt, err := newWALTester(b.Name(), prodDependencies{})
 	if err != nil {
 		b.Error(err)
 	}
+	defer wt.Close()
 
 	// Prepare a random update
 	updates := []Update{}

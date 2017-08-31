@@ -15,3 +15,15 @@ const (
 	pageStatusComitted = 3
 	pageStatusApplied  = 4
 )
+
+// Metadata contains the header and version of the data being stored.
+type Metadata struct {
+	Header, Version string
+}
+
+var (
+	metadata = Metadata{
+		Header:  "WAL",
+		Version: "1.0",
+	}
+)
