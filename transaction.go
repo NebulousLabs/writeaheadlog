@@ -1,7 +1,9 @@
 package wal
 
 import (
-	"encoding/json"
+	"bytes"
+	"encoding/binary"
+	"io"
 	"runtime"
 	"sync/atomic"
 
@@ -47,9 +49,15 @@ type Update struct {
 // together at full integrity, or none of the updates in the transaction will
 // have been saved at all.
 //
-// While m multiple transactions can be safely open at the same time, multiple
-// methods should not be called on the transaction at the same time - the WAL is
-// thread-safe, but the transactions are not.
+// While multiple transactions can be safely open at the same time, multiple
+// methods should not be called on the transaction at the same time - the WAL
+// is thread-safe, but the transactions are not.
+//
+// A Transaction is created by calling NewTransaction. Afterwards, the
+// transactions SignalSetupComplete has to be called which returns a channel
+// that is closed once the transaction is committed. Finally
+// SignalUpdatesApplied needs to be called after the transaction was committed
+// to signal a successfull transaction and free used pages.
 type Transaction struct {
 	// setupComplete, commitComplete, and releaseComplete signal the progress of
 	// the transaction, and should be set to 'true' in order.
@@ -83,16 +91,16 @@ type Transaction struct {
 
 	// The wal that was used to create the transaction
 	wal *WAL
+
+	// An internal channel to signal that the transaction was initialized and
+	// can be committed
+	initComplete chan error
 }
 
-// MarshalJSON marshales a transaction.
+// checksum calculates the checksum of a transaction excluding the checksum
+// field of each page
 func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
 	page := t.firstPage
-
-	// Backup the existing checksum and replace it with zeros
-	checksumBackup := t.firstPage.transactionChecksum
-	var zeroHash [crypto.HashSize]byte
-	page.transactionChecksum = zeroHash
 
 	// Marshall all the pages and calculate the checksum
 	var data []byte
@@ -101,17 +109,27 @@ func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
 		if err != nil {
 			return [crypto.HashSize]byte{}, build.ExtendErr("Failed to marshall page", err)
 		}
-		data = append(data, bytes...)
+		// Ignore the transactionChecksum field (first 32 bytes)
+		data = append(data, bytes[crypto.HashSize:]...)
 		page = page.nextPage
 	}
-
-	// Restore the previous checksum of the first page
-	t.firstPage.transactionChecksum = checksumBackup
 	return crypto.HashBytes(data), nil
 }
 
 //commit commits a transaction by setting the correct status and checksum
-func (t *Transaction) commit() error {
+func (t *Transaction) commit(done chan error) {
+	// Signal completion of the commit
+	defer close(done)
+
+	// Make sure that the initialization of the transaction finished
+	select {
+	case err := <-t.initComplete:
+		if err != nil {
+			done <- err
+			return
+		}
+	}
+
 	// set the status of the first page first
 	t.firstPage.pageStatus = pageStatusComitted
 
@@ -121,7 +139,8 @@ func (t *Transaction) commit() error {
 	// calculate the checksum and write it to the first page
 	checksum, err := t.checksum()
 	if err != nil {
-		return build.ExtendErr("Unable to create checksum of transaction", err)
+		// Don't return here to avoid a deadlock. Do it after the counter was increased
+		done <- build.ExtendErr("Unable to create checksum of transaction", err)
 	}
 	t.firstPage.transactionChecksum = checksum
 
@@ -130,19 +149,161 @@ func (t *Transaction) commit() error {
 		runtime.Gosched()
 	}
 
-	// Finalize the commit by writing the first page with the updated status
-	err = t.firstPage.Write(t.wal.logFile)
+	// Finalize the commit by writing the first page with the updated status if
+	// there have been no errors so far.
+	if err == nil {
+		err = t.firstPage.Write(t.wal.logFile)
+	}
 
 	// Increase the transaction counter
 	atomic.AddUint64(&t.wal.atomicTransactionCounter, 1)
 
 	if err != nil {
-		return build.ExtendErr("Writing the first page failed", err)
+		done <- build.ExtendErr("Writing the first page failed", err)
+		return
 	}
 
 	t.commitComplete = true
 	t.wal.logFile.Sync()
-	return nil
+}
+
+// marshalUpdates marshals the updates of a transaction
+func marshalUpdates(updates []Update) ([]byte, error) {
+	buffer := new(bytes.Buffer)
+
+	for _, update := range updates {
+		// Marshal name
+		name := []byte(update.Name)
+		err1 := binary.Write(buffer, binary.LittleEndian, uint64(len(name)))
+		_, err2 := buffer.Write(name)
+
+		// Marshal version
+		version := []byte(update.Version)
+		err3 := binary.Write(buffer, binary.LittleEndian, uint64(len(version)))
+		_, err4 := buffer.Write(version)
+
+		// Append instructions
+		err5 := binary.Write(buffer, binary.LittleEndian, uint64(len(update.Instructions)))
+		_, err6 := buffer.Write(update.Instructions)
+
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
+			return nil, errors.Compose(errors.New("Failed to marshal updates"), err1, err2, err3, err4, err5, err6)
+		}
+	}
+
+	return buffer.Bytes(), nil
+}
+
+// unmarshalUpdates unmarshals the updates of a transaction
+func unmarshalUpdates(data []byte) ([]Update, error) {
+	buffer := bytes.NewBuffer(data)
+	updates := make([]Update, 0)
+
+	for {
+		update := Update{}
+
+		// Unmarshal name
+		var nameLength uint64
+		err1 := binary.Read(buffer, binary.LittleEndian, &nameLength)
+		if err1 == io.EOF {
+			// End of buffer reached
+			break
+		}
+
+		name := make([]byte, nameLength)
+		_, err2 := buffer.Read(name)
+
+		// Unmarshal version
+		var versionLength uint64
+		err3 := binary.Read(buffer, binary.LittleEndian, &versionLength)
+
+		version := make([]byte, versionLength)
+		_, err4 := buffer.Read(version)
+
+		// Unmarshal instructions
+		var instructionsLength uint64
+		err5 := binary.Read(buffer, binary.LittleEndian, &instructionsLength)
+
+		instructions := make([]byte, instructionsLength)
+		_, err6 := buffer.Read(instructions)
+
+		// Check if any errors occured
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
+			return nil, errors.Compose(errors.New("Failed to unmarshal updates"), err1, err2, err3, err4, err5, err6)
+		}
+
+		update.Name = string(name)
+		update.Version = string(version)
+		update.Instructions = instructions
+
+		updates = append(updates, update)
+	}
+
+	return updates, nil
+}
+
+// threadedInitTransaction reserves pages of the wal, marshalls the
+// transactions's updates into a payload and splits the payload equally among
+// the pages. Once finished those pages are written to disk and the transaction
+// is committed.
+func threadedInitTransaction(t *Transaction) {
+	defer close(t.initComplete)
+
+	// Marshal all the updates to get their total length on disk
+	data, err := marshalUpdates(t.Updates)
+	if err != nil {
+		t.initComplete <- build.ExtendErr("could not marshal update", err)
+		return
+	}
+
+	// Find out how many pages are needed for the update
+	requiredPages := uint64(float64(len(data))/float64(maxPayloadSize+8) + 1)
+
+	// Get the pages from the wal
+	reservedPages := t.wal.reservePages(requiredPages)
+
+	// Set the fields of each page
+	pages := make([]page, requiredPages)
+	for i := uint64(0); i < requiredPages; i++ {
+		// Set offset according to the index in reservedPages
+		pages[i].offset = reservedPages[i]
+
+		// Set nextPage if the current page isn't the last one
+		// otherwise let it be nil
+		if i+1 < requiredPages {
+			pages[i].nextPage = &pages[i+1]
+		}
+
+		// Set pageStatus of the first page to pageStatusWritten
+		if i == 0 {
+			pages[i].pageStatus = pageStatusWritten
+		} else {
+			pages[i].pageStatus = pageStatusOther
+		}
+
+		// Copy part of the update into the payload
+		payloadsize := maxPayloadSize
+		if len(data[i*maxPayloadSize:]) < payloadsize {
+			payloadsize = len(data[i*maxPayloadSize:])
+		}
+		pages[i].payload = make([]byte, payloadsize)
+		copy(pages[i].payload, data[i*maxPayloadSize:])
+	}
+
+	// Set the first and final page of the transaction
+	t.firstPage = &pages[0]
+	t.finalPage = &pages[len(pages)-1]
+
+	// write the pages to disk and set the pageStatus
+	page := t.firstPage
+	for page != nil {
+		err := page.Write(t.wal.logFile)
+		if err != nil {
+			t.initComplete <- build.ExtendErr("Couldn't write the page to file", err)
+			return
+		}
+		page = page.nextPage
+	}
 }
 
 // validateChecksum checks if a transaction has been corrupted by computing a hash
@@ -162,18 +323,31 @@ func (t Transaction) validateChecksum() error {
 	return nil
 }
 
-// SignalApplyComplete  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
-func (t *Transaction) SignalApplyComplete() <-chan error {
+// NewTransaction creates a transaction from a set of updates
+func (w *WAL) NewTransaction(updates []Update) *Transaction {
+	// Create new transaction
+	newTransaction := Transaction{
+		Updates:      updates,
+		wal:          w,
+		initComplete: make(chan error),
+	}
+
+	// Initialize the transaction by splitting up the payload among free pages
+	// and writing them to disk.
+	go threadedInitTransaction(&newTransaction)
+
+	return &newTransaction
+}
+
+// SignalUpdatesApplied  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
+func (t *Transaction) SignalUpdatesApplied() <-chan error {
 	if !t.setupComplete || !t.commitComplete || t.releaseComplete {
-		panic("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")
+		panic("misuse of transaction - call each of the signaling methods exactly once, in serial, in order")
 	}
 	t.releaseComplete = true
 	notifyChannel := make(chan error)
 
 	go func() {
-		t.wal.mu.Lock()
-		defer t.wal.mu.Unlock()
-
 		// Set the page status to applied
 		t.firstPage.pageStatus = pageStatusApplied
 
@@ -183,14 +357,17 @@ func (t *Transaction) SignalApplyComplete() <-chan error {
 			notifyChannel <- build.ExtendErr("Couldn't write the page to file", err)
 			return
 		}
+		t.wal.logFile.Sync()
 
 		// Update the wallets available pages
 		page := t.firstPage
+		t.wal.mu.Lock()
 		for page != nil {
 			// Append the index of the freed page
 			t.wal.availablePages = append(t.wal.availablePages, page.offset)
 			page = page.nextPage
 		}
+		t.wal.mu.Unlock()
 		notifyChannel <- nil
 	}()
 	return notifyChannel
@@ -204,90 +381,10 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 		panic("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")
 	}
 	t.setupComplete = true
-	notifyChannel := make(chan error)
+	done := make(chan error)
 
-	// Create the transaction non-blocking
-	go func() {
-		// TODO: maybe not lock the whole scope
-		defer close(notifyChannel)
-		t.wal.mu.Lock()
-		defer t.wal.mu.Unlock()
+	// Commit the transaction non-blocking
+	go t.commit(done)
 
-		// Marshal all the updates to get their total length on disk
-		data, err := json.Marshal(t.Updates)
-		if err != nil {
-			notifyChannel <- build.ExtendErr("could not marshal update", err)
-			return
-		}
-
-		// Find out how many pages are needed for the update
-		requiredPages := uint64(float64(len(data))/float64(maxPayloadSize+8) + 1)
-
-		// Check if enough pages are available
-		if uint64(len(t.wal.availablePages)) < requiredPages {
-			// Add enough pages for the new transaction
-			numNewPages := requiredPages - uint64(len(t.wal.availablePages))
-
-			// Starting at index 1 because the first page is reserved for metadata
-			for i := t.wal.filePageCount + 1; i < t.wal.filePageCount+numNewPages+1; i++ {
-				t.wal.availablePages = append(t.wal.availablePages, i*pageSize)
-			}
-			t.wal.filePageCount += numNewPages
-
-			// sanity check: the number of available pages should equal the number of required ones
-			if uint64(len(t.wal.availablePages)) != requiredPages {
-				panic(errors.New("sanity check failed: num of available pages != num of required pages"))
-			}
-		}
-
-		// Reserve some pages and remove them from the available ones
-		reservedPages := t.wal.availablePages[uint64(len(t.wal.availablePages))-requiredPages:]
-		t.wal.availablePages = t.wal.availablePages[:uint64(len(t.wal.availablePages))-requiredPages]
-
-		pages := make([]page, requiredPages)
-		for i := uint64(0); i < requiredPages; i++ {
-			// Set offset according to the index in reservedPages
-			pages[i].offset = reservedPages[i]
-
-			// Set nextPage if the current page isn't the last one
-			// otherwise let it be nil
-			if i+1 < requiredPages {
-				pages[i].nextPage = &pages[i+1]
-			}
-
-			// Set pageStatus of the first page to pageStatusWritten
-			if i == 0 {
-				pages[i].pageStatus = pageStatusWritten
-			} else {
-				pages[i].pageStatus = pageStatusOther
-			}
-
-			// Copy part of the update into the payload
-			payloadsize := maxPayloadSize
-			if len(data[i*maxPayloadSize:]) < payloadsize {
-				payloadsize = len(data[i*maxPayloadSize:])
-			}
-			pages[i].payload = make([]byte, payloadsize)
-			copy(pages[i].payload, data[i*maxPayloadSize:])
-		}
-
-		// Set the first and final page of the transaction
-		t.firstPage = &pages[0]
-		t.finalPage = &pages[len(pages)-1]
-
-		// write the pages to disk and set the pageStatus
-		page := t.firstPage
-		for page != nil {
-			err := page.Write(t.wal.logFile)
-			if err != nil {
-				notifyChannel <- build.ExtendErr("Couldn't write the page to file", err)
-				return
-			}
-			page = page.nextPage
-		}
-
-		// Commit transaction
-		notifyChannel <- t.commit()
-	}()
-	return notifyChannel
+	return done
 }

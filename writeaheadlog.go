@@ -48,7 +48,7 @@ type WAL struct {
 	logFile *os.File
 
 	// Utilities
-	mu  sync.RWMutex
+	mu  sync.Mutex
 	log *persist.Logger
 
 	// dependencies are used to inject special behaviour into the wal by providing
@@ -81,6 +81,15 @@ func (p ByTxnNumber) Swap(i, j int) {
 // Less determines if one element of the slice is less than the other
 func (p ByTxnNumber) Less(i, j int) bool {
 	return p[i].p.transactionNumber < p[j].p.transactionNumber
+}
+
+// allocatePages creates new pages and adds them to the available pages of the wal
+func (w *WAL) allocatePages(numPages uint64) {
+	// Starting at index 1 because the first page is reserved for metadata
+	for i := w.filePageCount + 1; i < w.filePageCount+numPages+1; i++ {
+		w.availablePages = append(w.availablePages, i*pageSize)
+	}
+	w.filePageCount += numPages
 }
 
 // newWal initializes and returns a wal.
@@ -170,7 +179,7 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 		// read the page data
 		offset := int64(i) * pageSize
 
-		// increase the available pages
+		// increase the number of available pages
 		w.availablePages = append(w.availablePages, uint64(offset))
 
 		// unmarshall the page
@@ -179,11 +188,6 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 		nextPage, err := unmarshalPage(&p, data[offset:offset+pageSize])
 		if err != nil {
 			continue
-		}
-
-		// Sanity check. Pages shouldn't be saved with pageStatusInvalid
-		if p.pageStatus == pageStatusInvalid {
-			panic(errors.New("Page was not initialized correctly"))
 		}
 
 		// If the page is the first page of a transaction remember it
@@ -210,16 +214,40 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 	return updates, nil
 }
 
+// reservePages reserves a number of pages by removing them from the available
+// pages. If it needs to allocate new pages it will do so
+func (w *WAL) reservePages(numPages uint64) []uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Check if enough pages are available
+	if uint64(len(w.availablePages)) < numPages {
+		// Add enough pages for the new transaction
+		numNewPages := numPages - uint64(len(w.availablePages))
+		w.allocatePages(numNewPages)
+
+		// sanity check: the number of available pages should equal the number of required ones
+		if uint64(len(w.availablePages)) != numPages {
+			panic(errors.New("sanity check failed: num of available pages != num of required pages"))
+		}
+	}
+
+	// Reserve some pages and remove them from the available ones
+	reservedPages := make([]uint64, numPages)
+	copy(reservedPages[:], w.availablePages[uint64(len(w.availablePages))-numPages:])
+	w.availablePages = w.availablePages[:uint64(len(w.availablePages))-numPages]
+	return reservedPages
+}
+
 // UnmarshalPage is a helper function that unmarshals the page and returns the offset of the next one
 // Note: setting offset and validating the checksum needs to be handled by the caller
 func unmarshalPage(p *page, b []byte) (nextPage uint64, err error) {
 	buffer := bytes.NewBuffer(b)
 
-	// Read pageStatus, transactionNumber, nextPage and checksum
-	err1 := binary.Read(buffer, binary.LittleEndian, &p.pageStatus)
-	err2 := binary.Read(buffer, binary.LittleEndian, &p.transactionNumber)
-	err3 := binary.Read(buffer, binary.LittleEndian, &nextPage)
-	_, err4 := buffer.Read(p.transactionChecksum[:])
+	// Read checksum, pageStatus, transactionNumber and nextPage
+	_, err1 := buffer.Read(p.transactionChecksum[:])
+	err2 := binary.Read(buffer, binary.LittleEndian, &p.pageStatus)
+	err3 := binary.Read(buffer, binary.LittleEndian, &p.transactionNumber)
+	err4 := binary.Read(buffer, binary.LittleEndian, &nextPage)
 
 	// Read payloadSize
 	var payloadSize uint64
@@ -289,7 +317,7 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 	}
 
 	// Restore updates from payload
-	if err = json.Unmarshal(txnPayload, &txn.Updates); err != nil {
+	if txn.Updates, err = unmarshalUpdates(txnPayload); err != nil {
 		return build.ExtendErr("Unable to unmarshal updates", err)
 	}
 
@@ -338,14 +366,4 @@ func (w *WAL) Close() {
 func New(path string, logger *persist.Logger) (u []Update, w *WAL, err error) {
 	// Create a wal with production dependencies
 	return newWal(path, logger, prodDependencies{})
-}
-
-// NewTransaction creates a transaction from a set of updates
-func (w *WAL) NewTransaction(updates []Update) *Transaction {
-	// Create new transaction
-	newTransaction := Transaction{
-		Updates: updates,
-		wal:     w,
-	}
-	return &newTransaction
 }

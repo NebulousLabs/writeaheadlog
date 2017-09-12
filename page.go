@@ -73,11 +73,15 @@ func (p page) Marshal() ([]byte, error) {
 
 	buffer := new(bytes.Buffer)
 
-	// write pageStatus, transactionNumber, nextPage and checksum
-	err1 := binary.Write(buffer, binary.LittleEndian, p.pageStatus)
-	err2 := binary.Write(buffer, binary.LittleEndian, p.transactionNumber)
-	err3 := binary.Write(buffer, binary.LittleEndian, nextPage)
-	_, err4 := buffer.Write(p.transactionChecksum[:])
+	// write checksum, pageStatus, transactionNumber and nextPage
+	_, err1 := buffer.Write(p.transactionChecksum[:])
+	err2 := binary.Write(buffer, binary.LittleEndian, p.pageStatus)
+	if p.pageStatus == pageStatusInvalid {
+		panic(errors.New("Sanity check failed. Page was marshalled with invalid PageStatus"))
+	}
+
+	err3 := binary.Write(buffer, binary.LittleEndian, p.transactionNumber)
+	err4 := binary.Write(buffer, binary.LittleEndian, nextPage)
 
 	// write payloadSize and payload
 	err5 := binary.Write(buffer, binary.LittleEndian, uint64(len(p.payload)))
@@ -90,8 +94,8 @@ func (p page) Marshal() ([]byte, error) {
 
 	// sanity check: page should be smaller or equal to pageSize
 	if buffer.Len() > pageSize {
-		panic(errors.New(fmt.Sprintf("sanity check failed: marshalled page is %d bytes too large",
-			pageSize-buffer.Len())))
+		panic(fmt.Errorf("sanity check failed: marshalled page is %d bytes too large",
+			pageSize-buffer.Len()))
 	}
 
 	return buffer.Bytes(), nil
@@ -103,7 +107,6 @@ func (p page) Write(f *os.File) error {
 	if err != nil {
 		return build.ExtendErr("Marshalling the page failed", err)
 	}
-
 	// Write the page to the file
 	_, err = f.WriteAt(data, int64(p.offset))
 	if err != nil {

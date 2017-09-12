@@ -30,12 +30,8 @@ func (wt *walTester) Close() {
 	wt.wal.Close()
 }
 
-// newContractManagerTester returns a ready-to-rock contract manager tester.
+// newWalTester returns a ready-to-rock walTester.
 func newWALTester(name string, deps dependencies) (*walTester, error) {
-	if testing.Short() {
-		panic("use of newContractManagerTester during short testing")
-	}
-
 	// Create temp dir
 	testdir := build.TempDir("wal", name)
 	err := os.MkdirAll(testdir, 0700)
@@ -99,7 +95,7 @@ func TestTransactionInterrupted(t *testing.T) {
 	}
 
 	// release the changes of the second transaction
-	wait2 = txn2.SignalApplyComplete()
+	wait2 = txn2.SignalUpdatesApplied()
 	if err := <-wait2; err != nil {
 		t.Errorf("SignalApplyComplete for the second transaction failed")
 	}
@@ -152,7 +148,7 @@ func TestWalParallel(t *testing.T) {
 			done <- err
 			return
 		}
-		if err := <-txn.SignalApplyComplete(); err != nil {
+		if err := <-txn.SignalUpdatesApplied(); err != nil {
 			done <- err
 			return
 		}
@@ -231,7 +227,7 @@ func TestPageRecycling(t *testing.T) {
 		t.Errorf("Number of available pages should be 0 but was %v", len(wt.wal.availablePages))
 	}
 
-	if err := <-txn.SignalApplyComplete(); err != nil {
+	if err := <-txn.SignalUpdatesApplied(); err != nil {
 		t.Errorf("SignalApplyComplete failed: %v", err)
 	}
 
@@ -256,7 +252,7 @@ func TestPageRecycling(t *testing.T) {
 	if len(wt.wal.availablePages) != 0 {
 		t.Errorf("Number of available pages should be 0 but was %v", len(wt.wal.availablePages))
 	}
-	if err := <-txn2.SignalApplyComplete(); err != nil {
+	if err := <-txn2.SignalUpdatesApplied(); err != nil {
 		t.Errorf("SignalApplyComplete failed: %v", err)
 	}
 
@@ -360,7 +356,7 @@ func TestRestoreTransactions(t *testing.T) {
 		}
 		// Unmarshal the updates of the current transaction
 		var currentUpdates []Update
-		err := json.Unmarshal(updateBytes, &currentUpdates)
+		currentUpdates, err := unmarshalUpdates(updateBytes)
 		if err != nil {
 			t.Errorf("Unmarshal of updates failed %v", err)
 		}
@@ -409,7 +405,7 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 		if err := <-txn.SignalSetupComplete(); err != nil {
 			return err
 		}
-		if err := <-txn.SignalApplyComplete(); err != nil {
+		if err := <-txn.SignalUpdatesApplied(); err != nil {
 			return err
 		}
 		return nil
