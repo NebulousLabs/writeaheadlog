@@ -412,7 +412,8 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 	}
 
 	// Create numThreads instances of the function which repeatedly call f() until 1 minute passed
-	numThreads := 1000
+	numThreads := 100
+	b.Logf("Running benchmark with %v threads", numThreads)
 	stop := make(chan struct{})
 	numTxns := make(chan int)
 	for i := 0; i < numThreads; i++ {
@@ -458,4 +459,153 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 	b.Logf("used pages: %v", wt.wal.filePageCount)
 	b.Logf("total transactions: %v", totalTxns)
 	b.Logf("txn/s: %v", float64(totalTxns)/60.0)
+}
+
+// BenchmarkDiskSingleWrite writes 10,000 pages of 4kib size and spins up 1
+// goroutine for each page that overwrites it once
+func BenchmarkDiskSingleWrite(b *testing.B) {
+	// Get a tmp dir path
+	tmpdir := build.TempDir("wal")
+
+	// Create dir
+	err := os.MkdirAll(tmpdir, 0700)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Create a tmp file
+	f, err := os.Create(tmpdir + "/wal.dat")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Declare some variables
+	numThreads := 10000
+	pageSize := 4096
+
+	// Write numThreads pages to file
+	_, err = f.Write(fastrand.Bytes(pageSize * numThreads))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Define random page data
+	data := fastrand.Bytes(pageSize)
+
+	// Declare a channel to wait on later
+	wait := make(chan error)
+
+	// Declare a function that writes a page at the offset i * pageSize
+	write := func(i int) {
+		_, err = f.WriteAt(data, int64(i*pageSize))
+		if err != nil {
+			wait <- err
+			return
+		}
+		wait <- f.Sync()
+	}
+
+	// Reset the timer
+	b.ResetTimer()
+
+	// Create one thread for each page and make it overwrite the page and call sync
+	for i := 0; i < numThreads; i++ {
+		go write(i)
+	}
+
+	// Wait for the threads and check if they were successfull
+	for i := 0; i < numThreads; i++ {
+		err = <-wait
+		if err != nil {
+			b.Error(err)
+		}
+	}
+
+	// Get fileinfo
+	info, err := f.Stat()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Print some info
+	b.Logf("Number of threads: %v", numThreads)
+	b.Logf("PageSize: %v bytes", pageSize)
+	b.Logf("Filesize after benchmark %v", info.Size())
+}
+
+// BenchmarkDiskMultipleWrites writes 10,000 pages of 4kib size and spins up 1
+// goroutine for each page that overwrites it multiple times
+func BenchmarkDiskMultipleWrites(b *testing.B) {
+	// Get a tmp dir path
+	tmpdir := build.TempDir("wal")
+
+	// Create dir
+	err := os.MkdirAll(tmpdir, 0700)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Create a tmp file
+	f, err := os.Create(tmpdir + "/wal.dat")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Declare some variables
+	numThreads := 10000
+	pageSize := 4096
+
+	// Write numThreads pages to file
+	_, err = f.Write(fastrand.Bytes(pageSize * numThreads))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Define random page data
+	data := fastrand.Bytes(pageSize)
+
+	// Declare a channel to wait on later
+	wait := make(chan error)
+
+	// Declare a function that writes a page at the offset i * pageSize 4 times
+	write := func(i int) {
+		for j := 0; j < 4; j++ {
+			if _, err = f.WriteAt(data, int64(i*pageSize)); err != nil {
+				wait <- err
+				return
+			}
+			if err = f.Sync(); err != nil {
+				wait <- err
+				return
+			}
+		}
+		wait <- nil
+	}
+
+	// Reset the timer
+	b.ResetTimer()
+
+	// Create one thread for each page and make it overwrite the page and call sync
+	for i := 0; i < numThreads; i++ {
+		go write(i)
+	}
+
+	// Wait for the threads and check if they were successfull
+	for i := 0; i < numThreads; i++ {
+		err = <-wait
+		if err != nil {
+			b.Error(err)
+		}
+	}
+
+	// Get fileinfo
+	info, err := f.Stat()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Print some info
+	b.Logf("Number of threads: %v", numThreads)
+	b.Logf("PageSize: %v bytes", pageSize)
+	b.Logf("Filesize after benchmark %v", info.Size())
 }
