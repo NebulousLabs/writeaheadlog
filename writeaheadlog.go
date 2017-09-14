@@ -47,9 +47,25 @@ type WAL struct {
 	// logFile contains all of the persistent data associated with the log.
 	logFile *os.File
 
-	// Utilities
-	mu  sync.Mutex
+	// mu is used to lock the availablePages field of the wal
+	mu sync.Mutex
+
+	// log is used to log errors and warnings
 	log *persist.Logger
+
+	// syncCond is used to schedule the calls to fsync
+	syncCond *sync.Cond
+
+	// syncMu is the lock contained in syncCond and must be held before
+	// changing the state of the syncCond
+	syncMu sync.Mutex
+
+	// syncCount is a counter that indicates how many transactions are
+	// currently waiting for a fsync
+	syncCount uint64
+
+	// stopChan is a channel that is used to signal a shutdown
+	stopChan chan struct{}
 
 	// dependencies are used to inject special behaviour into the wal by providing
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
@@ -96,9 +112,13 @@ func (w *WAL) allocatePages(numPages uint64) {
 func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update, w *WAL, err error) {
 	// Create a new WAL
 	newWal := WAL{
-		deps: deps,
-		log:  logger,
+		deps:     deps,
+		log:      logger,
+		stopChan: make(chan struct{}),
 	}
+
+	// Create a condition for the wal
+	newWal.syncCond = sync.NewCond(&newWal.syncMu)
 
 	// Try opening the WAL file.
 	data, err := ioutil.ReadFile(path)
@@ -136,6 +156,9 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 	if err = writeWALMetadata(newWal.logFile); err != nil {
 		return nil, nil, build.ExtendErr("Failed to write metadata to file", err)
 	}
+
+	// Start the sync loop
+	go threadedWalSync(&newWal)
 
 	return nil, &newWal, nil
 }
@@ -350,6 +373,7 @@ func writeWALMetadata(f *os.File) error {
 
 // Close closes the wal and frees used resources
 func (w *WAL) Close() {
+	close(w.stopChan)
 	w.logFile.Close()
 }
 

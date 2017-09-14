@@ -164,7 +164,7 @@ func (t *Transaction) commit(done chan error) {
 	}
 
 	t.commitComplete = true
-	t.wal.logFile.Sync()
+	t.wal.fSync()
 }
 
 // marshalUpdates marshals the updates of a transaction
@@ -357,8 +357,7 @@ func (t *Transaction) SignalUpdatesApplied() <-chan error {
 			notifyChannel <- build.ExtendErr("Couldn't write the page to file", err)
 			return
 		}
-		t.wal.logFile.Sync()
-
+		t.wal.fSync()
 		// Update the wallets available pages
 		page := t.firstPage
 		t.wal.mu.Lock()

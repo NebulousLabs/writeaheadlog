@@ -429,8 +429,8 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 
 	// Start threads
 	for i := 0; i < numThreads; i++ {
+		wg.Add(1)
 		go func() {
-			wg.Add(1)
 			defer wg.Done()
 			for {
 				// Check for stop signal
@@ -524,7 +524,6 @@ func BenchmarkDiskSingleWrite(b *testing.B) {
 
 	// Declare a function that writes a page at the offset i * pageSize
 	write := func(i int) {
-		wg.Add(1)
 		defer wg.Done()
 		if _, err = f.WriteAt(data, int64(i*pageSize)); err != nil {
 			atomic.AddUint64(&atomicCounter, 1)
@@ -541,6 +540,7 @@ func BenchmarkDiskSingleWrite(b *testing.B) {
 
 	// Create one thread for each page and make it overwrite the page and call sync
 	for i := 0; i < numThreads; i++ {
+		wg.Add(1)
 		go write(i)
 	}
 
@@ -609,7 +609,6 @@ func BenchmarkDiskMultipleWrites(b *testing.B) {
 
 	// Declare a function that writes a page at the offset i * pageSize 4 times
 	write := func(i int) {
-		wg.Add(1)
 		defer wg.Done()
 		for j := 0; j < 4; j++ {
 			if _, err = f.WriteAt(data, int64(i*pageSize)); err != nil {
@@ -628,6 +627,7 @@ func BenchmarkDiskMultipleWrites(b *testing.B) {
 
 	// Create one thread for each page and make it overwrite the page and call sync
 	for i := 0; i < numThreads; i++ {
+		wg.Add(1)
 		go write(i)
 	}
 
