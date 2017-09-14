@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -414,24 +416,36 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 	// Create numThreads instances of the function which repeatedly call f() until 1 minute passed
 	numThreads := 100
 	b.Logf("Running benchmark with %v threads", numThreads)
+
+	// Create a channel to stop threads
 	stop := make(chan struct{})
-	numTxns := make(chan int)
+
+	// Create atomic variables to count transactions and errors
+	var atomicNumTxns uint64
+	var atomicNumErr uint64
+
+	// Create waitgroup to wait for threads before reading the counters
+	var wg sync.WaitGroup
+
+	// Start threads
 	for i := 0; i < numThreads; i++ {
 		go func() {
-			txns := 0
+			wg.Add(1)
+			defer wg.Done()
 			for {
+				// Check for stop signal
 				select {
 				case <-stop:
-					numTxns <- txns
 					return
 				default:
 				}
+				// Execute the function
 				if err := f(); err != nil {
-					b.Error(err)
-					close(numTxns)
+					// Abort thread on error
+					atomic.AddUint64(&atomicNumErr, 1)
 					return
 				}
-				txns++
+				atomic.AddUint64(&atomicNumTxns, 1)
 			}
 		}()
 	}
@@ -442,10 +456,12 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 		close(stop)
 	}
 
-	// Wait for each thread to finish and sum up the number of finished txns
-	totalTxns := 0
-	for i := 0; i < numThreads; i++ {
-		totalTxns += <-numTxns
+	// Wait for each thread to finish
+	wg.Wait()
+
+	// Check if any errors happened
+	if atomicNumErr > 0 {
+		b.Fatalf("%v errors happened during execution", atomicNumErr)
 	}
 
 	// Get the fileinfo
@@ -457,8 +473,8 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 	// Log results
 	b.Logf("filesize: %v mb", float64(fi.Size())/float64(1e+6))
 	b.Logf("used pages: %v", wt.wal.filePageCount)
-	b.Logf("total transactions: %v", totalTxns)
-	b.Logf("txn/s: %v", float64(totalTxns)/60.0)
+	b.Logf("total transactions: %v", atomicNumTxns)
+	b.Logf("txn/s: %v", float64(atomicNumTxns)/60.0)
 }
 
 // BenchmarkDiskSingleWrite writes 10,000 pages of 4kib size and spins up 1
@@ -479,6 +495,9 @@ func BenchmarkDiskSingleWrite(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	// Close it after test
+	defer f.Close()
+
 	// Declare some variables
 	numThreads := 10000
 	pageSize := 4096
@@ -489,20 +508,32 @@ func BenchmarkDiskSingleWrite(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	// Sync it
+	if err = f.Sync(); err != nil {
+		b.Fatal(err)
+	}
+
 	// Define random page data
 	data := fastrand.Bytes(pageSize)
 
-	// Declare a channel to wait on later
-	wait := make(chan error)
+	// Declare a waitgroup for later
+	var wg sync.WaitGroup
+
+	// Count errors during execution
+	var atomicCounter uint64
 
 	// Declare a function that writes a page at the offset i * pageSize
 	write := func(i int) {
-		_, err = f.WriteAt(data, int64(i*pageSize))
-		if err != nil {
-			wait <- err
+		wg.Add(1)
+		defer wg.Done()
+		if _, err = f.WriteAt(data, int64(i*pageSize)); err != nil {
+			atomic.AddUint64(&atomicCounter, 1)
 			return
 		}
-		wait <- f.Sync()
+		if err = f.Sync(); err != nil {
+			atomic.AddUint64(&atomicCounter, 1)
+			return
+		}
 	}
 
 	// Reset the timer
@@ -514,11 +545,9 @@ func BenchmarkDiskSingleWrite(b *testing.B) {
 	}
 
 	// Wait for the threads and check if they were successfull
-	for i := 0; i < numThreads; i++ {
-		err = <-wait
-		if err != nil {
-			b.Error(err)
-		}
+	wg.Wait()
+	if atomicCounter > 0 {
+		b.Fatalf("%v errors happened during execution", atomicCounter)
 	}
 
 	// Get fileinfo
@@ -551,6 +580,9 @@ func BenchmarkDiskMultipleWrites(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	// Close it after test
+	defer f.Close()
+
 	// Declare some variables
 	numThreads := 10000
 	pageSize := 4096
@@ -561,25 +593,34 @@ func BenchmarkDiskMultipleWrites(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	// Sync it
+	if err = f.Sync(); err != nil {
+		b.Fatal(err)
+	}
+
 	// Define random page data
 	data := fastrand.Bytes(pageSize)
 
-	// Declare a channel to wait on later
-	wait := make(chan error)
+	// Declare a waitGroup for later
+	var wg sync.WaitGroup
+
+	// Count errors during execution
+	var atomicCounter uint64
 
 	// Declare a function that writes a page at the offset i * pageSize 4 times
 	write := func(i int) {
+		wg.Add(1)
+		defer wg.Done()
 		for j := 0; j < 4; j++ {
 			if _, err = f.WriteAt(data, int64(i*pageSize)); err != nil {
-				wait <- err
+				atomic.AddUint64(&atomicCounter, 1)
 				return
 			}
 			if err = f.Sync(); err != nil {
-				wait <- err
+				atomic.AddUint64(&atomicCounter, 1)
 				return
 			}
 		}
-		wait <- nil
 	}
 
 	// Reset the timer
@@ -591,13 +632,10 @@ func BenchmarkDiskMultipleWrites(b *testing.B) {
 	}
 
 	// Wait for the threads and check if they were successfull
-	for i := 0; i < numThreads; i++ {
-		err = <-wait
-		if err != nil {
-			b.Error(err)
-		}
+	wg.Wait()
+	if atomicCounter > 0 {
+		b.Fatalf("%v errors happened during execution", atomicCounter)
 	}
-
 	// Get fileinfo
 	info, err := f.Stat()
 	if err != nil {
