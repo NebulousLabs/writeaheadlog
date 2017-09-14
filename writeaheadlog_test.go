@@ -396,7 +396,7 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 	updates = append(updates, Update{
 		Name:         "test",
 		Version:      "1.0",
-		Instructions: fastrand.Bytes(1234), // 1 page / txn
+		Instructions: fastrand.Bytes(4000), // 1 page / txn
 	})
 
 	// Define a function that creates a transaction from this update and applies it

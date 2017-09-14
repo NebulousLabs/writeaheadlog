@@ -67,6 +67,9 @@ type WAL struct {
 	// stopChan is a channel that is used to signal a shutdown
 	stopChan chan struct{}
 
+	// syncing indicates if the syncing thread is currently being executed
+	syncing bool
+
 	// dependencies are used to inject special behaviour into the wal by providing
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
@@ -156,9 +159,6 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 	if err = writeWALMetadata(newWal.logFile); err != nil {
 		return nil, nil, build.ExtendErr("Failed to write metadata to file", err)
 	}
-
-	// Start the sync loop
-	go threadedWalSync(&newWal)
 
 	return nil, &newWal, nil
 }
