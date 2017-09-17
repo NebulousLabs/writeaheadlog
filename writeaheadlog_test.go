@@ -504,7 +504,8 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 //
 // Results (Model, txn/s, maxLatency(ms), date)
 //
-// ST1000DM003-1CH162, 15.5, 125.49, 09/17/2017
+// ST1000DM003 , 15.5  , 125.49, 09/17/2017
+// MZVLW512HMJP, 175.28, 15.4  , 09/17/2017
 //
 func BenchmarkTransactionSpeed1(b *testing.B) {
 	benchmarkTransactionSpeed(b, 1)
@@ -515,7 +516,8 @@ func BenchmarkTransactionSpeed1(b *testing.B) {
 //
 // Results (Model, txn/s, maxLatency(ms), date)
 //
-// ST1000DM003-1CH162, 140.6, 125.86, 09/17/2017
+// ST1000DM003 , 140.6  , 125.86, 09/17/2017
+// MZVLW512HMJP, 1437.35, 18.07 , 09/17/2017
 //
 func BenchmarkTransactionSpeed10(b *testing.B) {
 	benchmarkTransactionSpeed(b, 10)
@@ -526,7 +528,8 @@ func BenchmarkTransactionSpeed10(b *testing.B) {
 //
 // Results (Model, txn/s, maxLatency(ms), date)
 //
-// ST1000DM003-1CH162, 1285, 209.37, 09/17/2017
+// ST1000DM003 , 1285   , 209.37, 09/17/2017
+// MZVLW512HMJP, 7589.93, 160.18, 09/17/2017
 //
 func BenchmarkTransactionSpeed100(b *testing.B) {
 	benchmarkTransactionSpeed(b, 100)
@@ -536,7 +539,8 @@ func BenchmarkTransactionSpeed100(b *testing.B) {
 //
 // Results (Model, txn/s, maxLatency(ms), date)
 //
-// ST1000DM003-1CH162, 3486, 461.38, 09/17/2017
+// ST1000DM003 , 3486   , 461.38, 09/17/2017
+// MZVLW512HMJP, 6101.05, 1479.8, 09/17/2017
 //
 func BenchmarkTransactionSpeed1000(b *testing.B) {
 	benchmarkTransactionSpeed(b, 1000)
@@ -632,7 +636,8 @@ func benchmarkDiskWrites(b *testing.B, numWrites int, pageSize int, numThreads i
 //
 // Results (Model, seconds, date)
 //
-// ST1000DM003-1CH162, 3.5, 09/17/2017
+// ST1000DM003 , 3.5, 09/17/2017
+// MZVLW512HMJP, 4.4, 09/17/2017
 //
 func BenchmarkDiskWrites1(b *testing.B) {
 	benchmarkDiskWrites(b, 1, 4096, 9990)
@@ -643,7 +648,8 @@ func BenchmarkDiskWrites1(b *testing.B) {
 //
 // Results (Model, seconds, date)
 //
-// ST1000DM003-1CH162, 56.4, 09/17/2017
+// ST1000DM003 , 56.4, 09/17/2017
+// MZVLW512HMJP, ??? , 09/17/2017	(results vary between 6 and 30 seconds)
 //
 func BenchmarkDiskWrites4(b *testing.B) {
 	benchmarkDiskWrites(b, 4, 4096, 9990)
