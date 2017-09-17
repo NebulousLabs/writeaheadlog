@@ -382,9 +382,12 @@ func TestRestoreTransactions(t *testing.T) {
 	}
 }
 
-// BenchmarkTransactionSpeed runs for 1 min to find out how many transactions
-// can be applied to the wal and how large the wal grows during that time.
-func BenchmarkTransactionSpeed(b *testing.B) {
+// benchmarkTransactionSpeed is a helper function to create benchmarks that run
+// for 1 min to find out how many transactions can be applied to the wal and
+// how large the wal grows during that time using a certain number of threads.
+func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
+	b.Logf("Running benchmark with %v threads", numThreads)
+
 	wt, err := newWALTester(b.Name(), prodDependencies{})
 	if err != nil {
 		b.Error(err)
@@ -412,10 +415,6 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 		}
 		return nil
 	}
-
-	// Create numThreads instances of the function which repeatedly call f() until 1 minute passed
-	numThreads := 100
-	b.Logf("Running benchmark with %v threads", numThreads)
 
 	// Create a channel to stop threads
 	stop := make(chan struct{})
@@ -477,94 +476,54 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 	b.Logf("txn/s: %v", float64(atomicNumTxns)/60.0)
 }
 
-// BenchmarkDiskSingleWrite writes 10,000 pages of 4kib size and spins up 1
-// goroutine for each page that overwrites it once
-func BenchmarkDiskSingleWrite(b *testing.B) {
-	// Get a tmp dir path
-	tmpdir := build.TempDir("wal")
-
-	// Create dir
-	err := os.MkdirAll(tmpdir, 0700)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	// Create a tmp file
-	f, err := os.Create(tmpdir + "/wal.dat")
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	// Close it after test
-	defer f.Close()
-
-	// Declare some variables
-	numThreads := 10000
-	pageSize := 4096
-
-	// Write numThreads pages to file
-	_, err = f.Write(fastrand.Bytes(pageSize * numThreads))
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	// Sync it
-	if err = f.Sync(); err != nil {
-		b.Fatal(err)
-	}
-
-	// Define random page data
-	data := fastrand.Bytes(pageSize)
-
-	// Declare a waitgroup for later
-	var wg sync.WaitGroup
-
-	// Count errors during execution
-	var atomicCounter uint64
-
-	// Declare a function that writes a page at the offset i * pageSize
-	write := func(i int) {
-		defer wg.Done()
-		if _, err = f.WriteAt(data, int64(i*pageSize)); err != nil {
-			atomic.AddUint64(&atomicCounter, 1)
-			return
-		}
-		if err = f.Sync(); err != nil {
-			atomic.AddUint64(&atomicCounter, 1)
-			return
-		}
-	}
-
-	// Reset the timer
-	b.ResetTimer()
-
-	// Create one thread for each page and make it overwrite the page and call sync
-	for i := 0; i < numThreads; i++ {
-		wg.Add(1)
-		go write(i)
-	}
-
-	// Wait for the threads and check if they were successfull
-	wg.Wait()
-	if atomicCounter > 0 {
-		b.Fatalf("%v errors happened during execution", atomicCounter)
-	}
-
-	// Get fileinfo
-	info, err := f.Stat()
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	// Print some info
-	b.Logf("Number of threads: %v", numThreads)
-	b.Logf("PageSize: %v bytes", pageSize)
-	b.Logf("Filesize after benchmark %v", info.Size())
+// BenchmarkTransactionSpeed1 runs benchmarkTransactionSpeed with 1
+//
+// Results (Model, txn/s, date)
+//
+// ST1000DM003-1CH162, 15.5, 09/17/2017
+//
+func BenchmarkTransactionSpeed1(b *testing.B) {
+	benchmarkTransactionSpeed(b, 1)
 }
 
-// BenchmarkDiskMultipleWrites writes 10,000 pages of 4kib size and spins up 1
-// goroutine for each page that overwrites it multiple times
-func BenchmarkDiskMultipleWrites(b *testing.B) {
+// BenchmarkTransactionSpeed10 runs benchmarkTransactionSpeed with 10
+// threads
+//
+// Results (Model, txn/s, date)
+//
+// ST1000DM003-1CH162, 140.6, 09/17/2017
+//
+func BenchmarkTransactionSpeed10(b *testing.B) {
+	benchmarkTransactionSpeed(b, 10)
+}
+
+// BenchmarkTransactionSpeed100 runs benchmarkTransactionSpeed with 100
+// threads
+//
+// Results (Model, txn/s, date)
+//
+// ST1000DM003-1CH162, 1285, 09/17/2017
+//
+func BenchmarkTransactionSpeed100(b *testing.B) {
+	benchmarkTransactionSpeed(b, 100)
+}
+
+// BenchmarkTransactionSpeed1000 runs benchmarkTransactionSpeed with 1000
+//
+// Results (Model, txn/s, date)
+//
+// ST1000DM003-1CH162, 3486, 09/17/2017
+//
+func BenchmarkTransactionSpeed1000(b *testing.B) {
+	benchmarkTransactionSpeed(b, 1000)
+}
+
+// benchmarkDiskWrites writes numThreads pages of pageSize size and spins up 1
+// goroutine for each page that overwrites it numWrites times
+func benchmarkDiskWrites(b *testing.B, numWrites int, pageSize int, numThreads int) {
+	b.Logf("Starting benchmark with %v writes and %v threads for pages of size %v",
+		numWrites, numThreads, pageSize)
+
 	// Get a tmp dir path
 	tmpdir := build.TempDir("wal")
 
@@ -582,10 +541,6 @@ func BenchmarkDiskMultipleWrites(b *testing.B) {
 
 	// Close it after test
 	defer f.Close()
-
-	// Declare some variables
-	numThreads := 10000
-	pageSize := 4096
 
 	// Write numThreads pages to file
 	_, err = f.Write(fastrand.Bytes(pageSize * numThreads))
@@ -610,7 +565,7 @@ func BenchmarkDiskMultipleWrites(b *testing.B) {
 	// Declare a function that writes a page at the offset i * pageSize 4 times
 	write := func(i int) {
 		defer wg.Done()
-		for j := 0; j < 4; j++ {
+		for j := 0; j < numWrites; j++ {
 			if _, err = f.WriteAt(data, int64(i*pageSize)); err != nil {
 				atomic.AddUint64(&atomicCounter, 1)
 				return
@@ -646,4 +601,26 @@ func BenchmarkDiskMultipleWrites(b *testing.B) {
 	b.Logf("Number of threads: %v", numThreads)
 	b.Logf("PageSize: %v bytes", pageSize)
 	b.Logf("Filesize after benchmark %v", info.Size())
+}
+
+// BenchmarkDiskWrites1 starts benchmarkDiskWrites with 9990 threads, 4kib
+// pages and overwrites those pages once
+//
+// Results (Model, seconds, date)
+//
+// ST1000DM003-1CH162, 3.5, 09/17/2017
+//
+func BenchmarkDiskWrites1(b *testing.B) {
+	benchmarkDiskWrites(b, 1, 4096, 9990)
+}
+
+// BenchmarkDiskWrites4 starts benchmarkDiskWrites with 9990 threads, 4kib
+// pages and overwrites those pages 4 times
+//
+// Results (Model, seconds, date)
+//
+// ST1000DM003-1CH162, 56.4, 09/17/2017
+//
+func BenchmarkDiskWrites4(b *testing.B) {
+	benchmarkDiskWrites(b, 4, 4096, 9990)
 }
