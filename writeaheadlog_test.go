@@ -402,18 +402,23 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 		Instructions: fastrand.Bytes(4000), // 1 page / txn
 	})
 
-	// Define a function that creates a transaction from this update and applies it
-	f := func() error {
+	// Define a function that creates a transaction from this update and
+	// applies it. It returns the duration it took to commit the transaction.
+	f := func() (latency time.Duration, err error) {
+		// Get start time
+		startTime := time.Now()
 		// Create txn
 		txn := wt.wal.NewTransaction(updates)
 		// Wait for the txn to be committed
-		if err := <-txn.SignalSetupComplete(); err != nil {
-			return err
+		if err = <-txn.SignalSetupComplete(); err != nil {
+			return
 		}
-		if err := <-txn.SignalUpdatesApplied(); err != nil {
-			return err
+		// Calculate latency after committing
+		latency = time.Since(startTime)
+		if err = <-txn.SignalUpdatesApplied(); err != nil {
+			return
 		}
-		return nil
+		return latency, nil
 	}
 
 	// Create a channel to stop threads
@@ -426,10 +431,13 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 	// Create waitgroup to wait for threads before reading the counters
 	var wg sync.WaitGroup
 
+	// Save latencies
+	latencies := make([]time.Duration, numThreads, numThreads)
+
 	// Start threads
 	for i := 0; i < numThreads; i++ {
 		wg.Add(1)
-		go func() {
+		go func(j int) {
 			defer wg.Done()
 			for {
 				// Check for stop signal
@@ -439,14 +447,20 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 				default:
 				}
 				// Execute the function
-				if err := f(); err != nil {
+				latency, err := f()
+				if err != nil {
 					// Abort thread on error
 					atomic.AddUint64(&atomicNumErr, 1)
 					return
 				}
 				atomic.AddUint64(&atomicNumTxns, 1)
+
+				// Remember highest latency
+				if latency > latencies[j] {
+					latencies[j] = latency
+				}
 			}
-		}()
+		}(i)
 	}
 
 	// Kill threads after 1 minute
@@ -469,18 +483,28 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 		b.Errorf("wal was deleted but shouldn't have")
 	}
 
+	// Find the maximum latency it took to commit a transaction
+	var maxLatency time.Duration
+	for i := 0; i < numThreads; i++ {
+		if latencies[i] > maxLatency {
+			maxLatency = latencies[i]
+		}
+	}
+
 	// Log results
 	b.Logf("filesize: %v mb", float64(fi.Size())/float64(1e+6))
 	b.Logf("used pages: %v", wt.wal.filePageCount)
 	b.Logf("total transactions: %v", atomicNumTxns)
 	b.Logf("txn/s: %v", float64(atomicNumTxns)/60.0)
+	b.Logf("maxLatency: %v", maxLatency)
+
 }
 
 // BenchmarkTransactionSpeed1 runs benchmarkTransactionSpeed with 1
 //
-// Results (Model, txn/s, date)
+// Results (Model, txn/s, maxLatency(ms), date)
 //
-// ST1000DM003-1CH162, 15.5, 09/17/2017
+// ST1000DM003-1CH162, 15.5, 125.49, 09/17/2017
 //
 func BenchmarkTransactionSpeed1(b *testing.B) {
 	benchmarkTransactionSpeed(b, 1)
@@ -489,9 +513,9 @@ func BenchmarkTransactionSpeed1(b *testing.B) {
 // BenchmarkTransactionSpeed10 runs benchmarkTransactionSpeed with 10
 // threads
 //
-// Results (Model, txn/s, date)
+// Results (Model, txn/s, maxLatency(ms), date)
 //
-// ST1000DM003-1CH162, 140.6, 09/17/2017
+// ST1000DM003-1CH162, 140.6, 125.86, 09/17/2017
 //
 func BenchmarkTransactionSpeed10(b *testing.B) {
 	benchmarkTransactionSpeed(b, 10)
@@ -500,9 +524,9 @@ func BenchmarkTransactionSpeed10(b *testing.B) {
 // BenchmarkTransactionSpeed100 runs benchmarkTransactionSpeed with 100
 // threads
 //
-// Results (Model, txn/s, date)
+// Results (Model, txn/s, maxLatency(ms), date)
 //
-// ST1000DM003-1CH162, 1285, 09/17/2017
+// ST1000DM003-1CH162, 1285, 209.37, 09/17/2017
 //
 func BenchmarkTransactionSpeed100(b *testing.B) {
 	benchmarkTransactionSpeed(b, 100)
@@ -510,9 +534,9 @@ func BenchmarkTransactionSpeed100(b *testing.B) {
 
 // BenchmarkTransactionSpeed1000 runs benchmarkTransactionSpeed with 1000
 //
-// Results (Model, txn/s, date)
+// Results (Model, txn/s, maxLatency(ms), date)
 //
-// ST1000DM003-1CH162, 3486, 09/17/2017
+// ST1000DM003-1CH162, 3486, 461.38, 09/17/2017
 //
 func BenchmarkTransactionSpeed1000(b *testing.B) {
 	benchmarkTransactionSpeed(b, 1000)
