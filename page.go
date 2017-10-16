@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"os"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
@@ -102,7 +101,7 @@ func (p page) Marshal() ([]byte, error) {
 }
 
 // Write writes the page to disk
-func (p page) Write(f *os.File) error {
+func (p page) Write(f file) error {
 	data, err := p.Marshal()
 	if err != nil {
 		return build.ExtendErr("Marshalling the page failed", err)

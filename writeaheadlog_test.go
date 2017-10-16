@@ -16,6 +16,32 @@ import (
 	"github.com/NebulousLabs/fastrand"
 )
 
+// dependencyCommitFail corrupts the first page of a transaction when it
+// is committed
+type dependencyCommitFail struct {
+	prodDependencies
+}
+
+func (dependencyCommitFail) disrupt(s string) bool {
+	if s == "CommitFail" {
+		return true
+	}
+	return false
+}
+
+// dependencyReleaseFail corrupts the first page of a transaction when it
+// is released
+type dependencyReleaseFail struct {
+	prodDependencies
+}
+
+func (dependencyReleaseFail) disrupt(s string) bool {
+	if s == "ReleaseFail" {
+		return true
+	}
+	return false
+}
+
 // walTester holds a WAL along with some other fields
 // useful for testing, and has methods implemented on it that can assist
 // testing.
@@ -68,12 +94,112 @@ func transactionPages(txn *Transaction) (pages []page) {
 	return
 }
 
+// TestCommitFailed checks if a corruption of the first page of the
+// transaction during the commit is handled correctly
+func TestCommitFailed(t *testing.T) {
+	wt, err := newWALTester(t.Name(), dependencyCommitFail{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create the transaction
+	txn := wt.wal.NewTransaction(updates)
+
+	// Committing the txn should fail on purpose
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err == nil {
+		t.Error("SignalSetupComplete should have failed but didn't")
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// make sure the wal is still there
+	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.logpath)
+	}
+
+	// Restart it. No unfinished updates should be reported since they were
+	// never committed
+	updates2, w, err := New(wt.logpath, wt.wal.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != 0 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
+	}
+}
+
+// TestReleaseFailed checks if a corruption of the first page of the
+// transaction during the commit is handled correctly
+func TestReleaseFailed(t *testing.T) {
+	wt, err := newWALTester(t.Name(), dependencyReleaseFail{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create the transaction
+	txn := wt.wal.NewTransaction(updates)
+
+	// Committing the txn should fail on purpose
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Error("SignalSetupComplete failed %v", err)
+	}
+
+	// Committing the txn should fail on purpose
+	wait = txn.SignalUpdatesApplied()
+	if err := <-wait; err == nil {
+		t.Error("SignalUpdatesApplies should have failed but didn't")
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// make sure the wal is still there
+	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.logpath)
+	}
+
+	// Restart it. There should be 1 unfinished update since it was committed
+	// but never released
+	updates2, w, err := New(wt.logpath, wt.wal.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != 1 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
+	}
+}
+
 // TestTransactionInterrupted checks if an interrupt between committing and releasing a
 // transaction is handled correctly upon reboot
 func TestTransactionInterrupted(t *testing.T) {
 	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	// Create a transaction with 1 update
 	updates := []Update{}
@@ -113,7 +239,7 @@ func TestTransactionInterrupted(t *testing.T) {
 	// Restart it and check if exactly 1 unfinished transaction is reported
 	updates2, w, err := New(wt.logpath, wt.wal.log)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	defer w.Close()
 

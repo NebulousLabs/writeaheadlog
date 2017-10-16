@@ -151,6 +151,11 @@ func (t *Transaction) commit(done chan error) {
 
 	// Finalize the commit by writing the first page with the updated status if
 	// there have been no errors so far.
+	if t.wal.deps.disrupt("CommitFail") {
+		// Disk failure causes the commit to fail
+		err = errors.New("Write failed on purpose")
+	}
+
 	if err == nil {
 		err = t.firstPage.Write(t.wal.logFile)
 	}
@@ -352,7 +357,14 @@ func (t *Transaction) SignalUpdatesApplied() <-chan error {
 		t.firstPage.pageStatus = pageStatusApplied
 
 		// Write the page to disk
-		err := t.firstPage.Write(t.wal.logFile)
+		var err error
+		if t.wal.deps.disrupt("ReleaseFail") {
+			// Disk failure causes the commit to fail
+			err = errors.New("Write failed on purpose")
+		} else {
+			err = t.firstPage.Write(t.wal.logFile)
+		}
+
 		if err != nil {
 			notifyChannel <- build.ExtendErr("Couldn't write the page to file", err)
 			return

@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"io/ioutil"
 	"math"
 	"os"
 	"sort"
@@ -45,7 +44,7 @@ type WAL struct {
 	atomicTransactionCounter uint64
 
 	// logFile contains all of the persistent data associated with the log.
-	logFile *os.File
+	logFile file
 
 	// mu is used to lock the availablePages field of the wal
 	mu sync.Mutex
@@ -122,9 +121,8 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 
 	// Create a condition for the wal
 	newWal.syncCond = sync.NewCond(&newWal.syncMu)
-
 	// Try opening the WAL file.
-	data, err := ioutil.ReadFile(path)
+	data, err := deps.readFile(path)
 	if err == nil {
 		// err == nil indicates that there is a WAL file which can be recovered to determine
 		// if the shutdown was clean or not
@@ -137,7 +135,7 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 		}
 
 		// Reuse the existing wal
-		newWal.logFile, err = os.OpenFile(path, os.O_RDWR, 0600)
+		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
 
 		// Invalidate data in wal
 		newWal.logFile.Write(make([]byte, len(data)))
@@ -150,7 +148,7 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 	}
 
 	// Create new empty WAL
-	newWal.logFile, err = os.Create(path)
+	newWal.logFile, err = deps.create(path)
 	if err != nil {
 		return nil, nil, build.ExtendErr("walFile could not be created", err)
 	}
@@ -196,9 +194,8 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 	if err := readWALMetadata(data[0:pageSize]); err != nil {
 		return nil, err
 	}
-
 	// Starting at index 1 because the first page is reserved for metadata
-	for i := 1; int64(i+1)*pageSize-1 < int64(len(data)); i++ {
+	for i := 1; int64(i)*pageSize < int64(len(data)); i++ {
 		// read the page data
 		offset := int64(i) * pageSize
 
@@ -207,8 +204,16 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 
 		// unmarshall the page
 		var p page
+		var nextPage uint64
+		var err error
 		p.offset = uint64(offset)
-		nextPage, err := unmarshalPage(&p, data[offset:offset+pageSize])
+
+		// Check if the
+		if offset+pageSize > int64(len(data)) {
+			nextPage, err = unmarshalPage(&p, data[offset:])
+		} else {
+			nextPage, err = unmarshalPage(&p, data[offset:offset+pageSize])
+		}
 		if err != nil {
 			continue
 		}
@@ -221,7 +226,6 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 
 	// Sort the first pages by transaction number
 	sort.Sort(firstPages)
-
 	// Recover the transactions in order and get their updates
 	updates := []Update{}
 	for _, sp := range firstPages {
@@ -353,7 +357,7 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 }
 
 // writeWALMetadata writes WAL metadata to the input file.
-func writeWALMetadata(f *os.File) error {
+func writeWALMetadata(f file) error {
 	changeBytes, err := json.MarshalIndent(metadata, "", "\t")
 	if err != nil {
 		return build.ExtendErr("could not marshal WAL metadata", err)
