@@ -194,9 +194,9 @@ func TestReleaseFailed(t *testing.T) {
 	}
 }
 
-// TestTransactionInterrupted checks if an interrupt between committing and releasing a
+// TestReleaseNotCalled checks if an interrupt between committing and releasing a
 // transaction is handled correctly upon reboot
-func TestTransactionInterrupted(t *testing.T) {
+func TestReleaseNotCalled(t *testing.T) {
 	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +246,125 @@ func TestTransactionInterrupted(t *testing.T) {
 	if len(updates2) != len(updates) {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
 			len(updates), len(updates2))
+	}
+}
+
+// TestPayloadCorrupted creates 2 update and corrupts the first one. Therefore
+// no unfinished transactions should be reported because the second one is
+// assumed to be corrupted too
+func TestPayloadCorrupted(t *testing.T) {
+	wt, err := newWALTester(t.Name(), prodDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create 2 txns
+	txn := wt.wal.NewTransaction(updates)
+	txn2 := wt.wal.NewTransaction(updates)
+
+	// Committing the txns but don't release them
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	wait = txn2.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	// Corrupt the payload of the first txn
+	txn.firstPage.payload = fastrand.Bytes(2000)
+	if err := txn.firstPage.Write(wt.wal.logFile); err != nil {
+		t.Errorf("Corrupting the page failed %v", err)
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// make sure the wal is still there
+	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.logpath)
+	}
+
+	// Restart it. No unfinished updates should be reported since the first txn
+	// was already corrupted
+	updates2, w, err := New(wt.logpath, wt.wal.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != 0 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
+	}
+}
+
+// TestPayloadCorrupted2 creates 2 update and corrupts the second one. Therefore
+// one unfinished transaction should be reported
+func TestPayloadCorrupted2(t *testing.T) {
+	wt, err := newWALTester(t.Name(), prodDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create 2 txns
+	txn := wt.wal.NewTransaction(updates)
+	txn2 := wt.wal.NewTransaction(updates)
+
+	// Committing the txns but don't release them
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	wait = txn2.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	// Corrupt the payload of the second txn
+	txn2.firstPage.payload = fastrand.Bytes(2000)
+	if err := txn2.firstPage.Write(wt.wal.logFile); err != nil {
+		t.Errorf("Corrupting the page failed %v", err)
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// make sure the wal is still there
+	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.logpath)
+	}
+
+	// Restart it. No unfinished updates should be reported since the first txn
+	// was already corrupted
+	updates2, w, err := New(wt.logpath, wt.wal.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != 1 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
 	}
 }
 

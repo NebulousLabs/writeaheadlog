@@ -312,7 +312,7 @@ func threadedInitTransaction(t *Transaction) {
 }
 
 // validateChecksum checks if a transaction has been corrupted by computing a hash
-// and comparing it to the one in the finalPage of the transaction
+// and comparing it to the one in the firstPage of the transaction
 func (t Transaction) validateChecksum() error {
 	// Check if finalPage is set
 	if t.firstPage == nil {

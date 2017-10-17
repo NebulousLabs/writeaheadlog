@@ -343,6 +343,12 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 		panic("sanity check failed. firstPage doesn't lead to finalPage")
 	}
 
+	// Verify the checksum before unmarshalling the updates. Otherwise we might
+	// get errors later
+	if err := txn.validateChecksum(); err != nil {
+		return err
+	}
+
 	// Restore updates from payload
 	if txn.Updates, err = unmarshalUpdates(txnPayload); err != nil {
 		return build.ExtendErr("Unable to unmarshal updates", err)
@@ -352,8 +358,7 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 	txn.setupComplete = true
 	txn.commitComplete = true
 
-	// Verify the checksum
-	return txn.validateChecksum()
+	return nil
 }
 
 // writeWALMetadata writes WAL metadata to the input file.
