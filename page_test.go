@@ -3,6 +3,7 @@ package wal
 import (
 	"bytes"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/NebulousLabs/Sia/crypto"
@@ -131,10 +132,13 @@ func BenchmarkPageMarshallingParallel(b *testing.B) {
 	b.ResetTimer()
 
 	// Start the threads and wait for them to finish
+	var wg sync.WaitGroup
 	for i := 0; i < numThreads; i++ {
-		go f()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f()
+		}()
 	}
-	for i := 0; i < numThreads; i++ {
-		<-wait
-	}
+	wg.Wait()
 }

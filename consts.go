@@ -9,11 +9,11 @@ const (
 )
 
 const (
-	pageStatusInvalid  = 0
-	pageStatusOther    = 1
-	pageStatusWritten  = 2
-	pageStatusComitted = 3
-	pageStatusApplied  = 4
+	pageStatusInvalid = iota
+	pageStatusOther
+	pageStatusWritten
+	pageStatusComitted
+	pageStatusApplied
 )
 
 // Metadata contains the header and version of the data being stored.
