@@ -31,17 +31,11 @@ type WAL struct {
 	// and the availablePages array is updated to include the extended pages.
 	filePageCount uint64
 
-	// atomicNextTransaction is used to give every transaction a unique transaction
+	// atomicNextTxnNum is used to give every transaction a unique transaction
 	// number. The transaction will then wait until atomicTransactionCounter allows
 	// the transaction to be committed. This ensures that transactions are committed
 	// in the correct order.
-	atomicNextTransaction uint64
-
-	// atomicTransactionCounter tracks what transaction is next to be committed. Each
-	// transaction is given a unique, ordered transaction number upon being
-	// committed, ensuring that updates can be returned to the user in the
-	// correct order in the event of unclean shutdown.
-	atomicTransactionCounter uint64
+	atomicNextTxnNum uint64
 
 	// logFile contains all of the persistent data associated with the log.
 	logFile file

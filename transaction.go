@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"runtime"
 	"sync/atomic"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -134,7 +133,7 @@ func (t *Transaction) commit(done chan error) {
 	t.firstPage.pageStatus = pageStatusComitted
 
 	// Set the transaction number of the first page and increase the transactionCounter of the wal
-	t.firstPage.transactionNumber = atomic.AddUint64(&t.wal.atomicNextTransaction, 1) - 1
+	t.firstPage.transactionNumber = atomic.AddUint64(&t.wal.atomicNextTxnNum, 1) - 1
 
 	// calculate the checksum and write it to the first page
 	checksum, err := t.checksum()
@@ -143,11 +142,6 @@ func (t *Transaction) commit(done chan error) {
 		done <- build.ExtendErr("Unable to create checksum of transaction", err)
 	}
 	t.firstPage.transactionChecksum = checksum
-
-	// Wait until it is safe to commit the transaction
-	for atomic.LoadUint64(&t.wal.atomicTransactionCounter) != t.firstPage.transactionNumber {
-		runtime.Gosched()
-	}
 
 	// Finalize the commit by writing the first page with the updated status if
 	// there have been no errors so far.
@@ -159,9 +153,6 @@ func (t *Transaction) commit(done chan error) {
 	if err == nil {
 		err = t.firstPage.Write(t.wal.logFile)
 	}
-
-	// Increase the transaction counter
-	atomic.AddUint64(&t.wal.atomicTransactionCounter, 1)
 
 	if err != nil {
 		done <- build.ExtendErr("Writing the first page failed", err)
