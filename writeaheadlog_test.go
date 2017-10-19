@@ -163,7 +163,7 @@ func TestReleaseFailed(t *testing.T) {
 	// Committing the txn should fail on purpose
 	wait := txn.SignalSetupComplete()
 	if err := <-wait; err != nil {
-		t.Error("SignalSetupComplete failed %v", err)
+		t.Errorf("SignalSetupComplete failed %v", err)
 	}
 
 	// Committing the txn should fail on purpose

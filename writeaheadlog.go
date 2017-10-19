@@ -224,11 +224,9 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 	updates := []Update{}
 	for _, sp := range firstPages {
 		var txn Transaction
-		if err = unmarshalTransaction(&txn, sp.p, sp.nextPage, data); err != nil {
-			// Stop recovering transactions
-			break
+		if err = unmarshalTransaction(&txn, sp.p, sp.nextPage, data); err == nil {
+			updates = append(updates, txn.Updates...)
 		}
-		updates = append(updates, txn.Updates...)
 	}
 	w.filePageCount = uint64(len(w.availablePages))
 
