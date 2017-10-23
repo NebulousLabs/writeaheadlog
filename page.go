@@ -16,6 +16,13 @@ import (
 type page struct {
 	// offset is the offset in the file that this page has.
 	offset uint64 // Is NOT marshalled to disk.
+
+	// transactionChecksum is the hash of all the pages and data in the
+	// committed transaction, including page status, nextPage, the payloads,
+	// and the transaction number. The checksum is only used internal to the
+	// WAL.
+	transactionChecksum [crypto.HashSize]byte
+
 	// pageStatus should never be set to '0' since this is the default value
 	// and would indicate an incorrectly initialized page
 	//
@@ -47,12 +54,6 @@ type page struct {
 	// it is marshalled to math.MaxUint64
 	transactionNumber uint64 // Gets marshalled to disk.
 
-	// transactionChecksum is the hash of all the pages and data in the
-	// committed transaction, including page status, nextPage, the payloads,
-	// and the transaction number. The checksum is only used internal to the
-	// WAL.
-	transactionChecksum [crypto.HashSize]byte // Gets marshalled to disk for the first page only.
-
 	// payload contains the marshalled update, which may be spread over multiple
 	// pages if it is large. If spread over multiple pages, the full payload
 	// can be assembled by appending the separate payloads together. To keep the
@@ -63,11 +64,15 @@ type page struct {
 
 // Marshal marshals a page.
 func (p page) Marshal() ([]byte, error) {
-	var nextPage uint64
+	if p.pageStatus == pageStatusInvalid {
+		panic(errors.New("Sanity check failed. Page was marshalled with invalid PageStatus"))
+	}
+
+	var nextPagePosition uint64
 	if p.nextPage != nil {
-		nextPage = p.nextPage.offset
+		nextPagePosition = p.nextPage.offset
 	} else {
-		nextPage = math.MaxUint64
+		nextPagePosition = math.MaxUint64
 	}
 
 	buffer := new(bytes.Buffer)
@@ -75,12 +80,9 @@ func (p page) Marshal() ([]byte, error) {
 	// write checksum, pageStatus, transactionNumber and nextPage
 	_, err1 := buffer.Write(p.transactionChecksum[:])
 	err2 := binary.Write(buffer, binary.LittleEndian, p.pageStatus)
-	if p.pageStatus == pageStatusInvalid {
-		panic(errors.New("Sanity check failed. Page was marshalled with invalid PageStatus"))
-	}
 
 	err3 := binary.Write(buffer, binary.LittleEndian, p.transactionNumber)
-	err4 := binary.Write(buffer, binary.LittleEndian, nextPage)
+	err4 := binary.Write(buffer, binary.LittleEndian, nextPagePosition)
 
 	// write payloadSize and payload
 	err5 := binary.Write(buffer, binary.LittleEndian, uint64(len(p.payload)))
@@ -100,8 +102,8 @@ func (p page) Marshal() ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-// Write writes the page to disk
-func (p page) Write(f file) error {
+// WriteToFile writes the page to disk
+func (p page) writeToFile(f file) error {
 	data, err := p.Marshal()
 	if err != nil {
 		return build.ExtendErr("Marshalling the page failed", err)

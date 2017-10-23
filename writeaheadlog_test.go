@@ -167,8 +167,7 @@ func TestReleaseFailed(t *testing.T) {
 	}
 
 	// Committing the txn should fail on purpose
-	wait = txn.SignalUpdatesApplied()
-	if err := <-wait; err == nil {
+	if err := txn.SignalUpdatesApplied(); err == nil {
 		t.Error("SignalUpdatesApplies should have failed but didn't")
 	}
 
@@ -223,8 +222,7 @@ func TestReleaseNotCalled(t *testing.T) {
 	}
 
 	// release the changes of the second transaction
-	wait2 = txn2.SignalUpdatesApplied()
-	if err := <-wait2; err != nil {
+	if err := txn2.SignalUpdatesApplied(); err != nil {
 		t.Errorf("SignalApplyComplete for the second transaction failed")
 	}
 
@@ -283,7 +281,7 @@ func TestPayloadCorrupted(t *testing.T) {
 
 	// Corrupt the payload of the first txn
 	txn.firstPage.payload = fastrand.Bytes(2000)
-	if err := txn.firstPage.Write(wt.wal.logFile); err != nil {
+	if err := txn.firstPage.writeToFile(wt.wal.logFile); err != nil {
 		t.Errorf("Corrupting the page failed %v", err)
 	}
 
@@ -295,15 +293,14 @@ func TestPayloadCorrupted(t *testing.T) {
 		t.Errorf("wal was deleted at %v", wt.logpath)
 	}
 
-	// Restart it. No unfinished updates should be reported since the first txn
-	// was already corrupted
+	// Restart it. 1 unfinished transaction should be reported
 	updates2, w, err := New(wt.logpath, wt.wal.log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer w.Close()
 
-	if len(updates2) != 0 {
+	if len(updates2) != 1 {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
 			0, len(updates2))
 	}
@@ -342,7 +339,7 @@ func TestPayloadCorrupted2(t *testing.T) {
 
 	// Corrupt the payload of the second txn
 	txn2.firstPage.payload = fastrand.Bytes(2000)
-	if err := txn2.firstPage.Write(wt.wal.logFile); err != nil {
+	if err := txn2.firstPage.writeToFile(wt.wal.logFile); err != nil {
 		t.Errorf("Corrupting the page failed %v", err)
 	}
 
@@ -354,8 +351,7 @@ func TestPayloadCorrupted2(t *testing.T) {
 		t.Errorf("wal was deleted at %v", wt.logpath)
 	}
 
-	// Restart it. No unfinished updates should be reported since the first txn
-	// was already corrupted
+	// Restart it. 1 Unfinished transaction should be reported.
 	updates2, w, err := New(wt.logpath, wt.wal.log)
 	if err != nil {
 		t.Fatal(err)
@@ -395,7 +391,7 @@ func TestWalParallel(t *testing.T) {
 			done <- err
 			return
 		}
-		if err := <-txn.SignalUpdatesApplied(); err != nil {
+		if err := txn.SignalUpdatesApplied(); err != nil {
 			done <- err
 			return
 		}
@@ -474,7 +470,7 @@ func TestPageRecycling(t *testing.T) {
 		t.Errorf("Number of available pages should be 0 but was %v", len(wt.wal.availablePages))
 	}
 
-	if err := <-txn.SignalUpdatesApplied(); err != nil {
+	if err := txn.SignalUpdatesApplied(); err != nil {
 		t.Errorf("SignalApplyComplete failed: %v", err)
 	}
 
@@ -499,7 +495,7 @@ func TestPageRecycling(t *testing.T) {
 	if len(wt.wal.availablePages) != 0 {
 		t.Errorf("Number of available pages should be 0 but was %v", len(wt.wal.availablePages))
 	}
-	if err := <-txn2.SignalUpdatesApplied(); err != nil {
+	if err := txn2.SignalUpdatesApplied(); err != nil {
 		t.Errorf("SignalApplyComplete failed: %v", err)
 	}
 
@@ -574,20 +570,9 @@ func TestRestoreTransactions(t *testing.T) {
 		if txn.firstPage == nil {
 			t.Errorf("%v: The firstPage of the txn is nil", i)
 		}
-		if txn.finalPage == nil {
-			t.Errorf("%v: The finalPage of the txn is nil", i)
-		}
 		if txn.firstPage.pageStatus != txns[i].firstPage.pageStatus {
 			t.Errorf("%v: The pageStatus of the txn is %v but should be",
 				txn.firstPage.pageStatus, txns[i].firstPage.pageStatus)
-		}
-		if txn.finalPage.transactionNumber != txns[i].finalPage.transactionNumber {
-			t.Errorf("%v: The transactionNumber of the txn is %v but should be",
-				txn.finalPage.transactionNumber, txns[i].finalPage.transactionNumber)
-		}
-		if txn.finalPage.transactionChecksum != txns[i].finalPage.transactionChecksum {
-			t.Errorf("%v: The transactionChecksum of the txn is %v but should be",
-				txn.finalPage.transactionChecksum, txns[i].finalPage.transactionChecksum)
 		}
 	}
 
@@ -660,7 +645,7 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 		}
 		// Calculate latency after committing
 		latency = time.Since(startTime)
-		if err = <-txn.SignalUpdatesApplied(); err != nil {
+		if err = txn.SignalUpdatesApplied(); err != nil {
 			return
 		}
 		return latency, nil

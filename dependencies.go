@@ -26,6 +26,7 @@ type (
 	}
 )
 
+// prodDependencies is a passthrough to the standard library calls
 type prodDependencies struct{}
 
 func (prodDependencies) disrupt(string) bool { return false }

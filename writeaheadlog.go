@@ -233,9 +233,15 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 	return updates, nil
 }
 
-// reservePages reserves a number of pages by removing them from the available
-// pages. If it needs to allocate new pages it will do so
-func (w *WAL) reservePages(numPages uint64) []uint64 {
+// managedReservePages reserves pages for a given payload. If it needs to
+// allocate new pages it will do so
+func (w *WAL) managedReservePages(data []byte) []page {
+	// Find out how many pages are needed for the payload
+	numPages := uint64(len(data) / maxPayloadSize)
+	if len(data)%maxPayloadSize != 0 {
+		numPages++
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// Check if enough pages are available
@@ -251,10 +257,38 @@ func (w *WAL) reservePages(numPages uint64) []uint64 {
 	}
 
 	// Reserve some pages and remove them from the available ones
-	reservedPages := make([]uint64, numPages)
-	copy(reservedPages[:], w.availablePages[uint64(len(w.availablePages))-numPages:])
+	reservedPages := w.availablePages[uint64(len(w.availablePages))-numPages:]
 	w.availablePages = w.availablePages[:uint64(len(w.availablePages))-numPages]
-	return reservedPages
+
+	// Set the fields of each page
+	pages := make([]page, numPages)
+	for i := uint64(0); i < numPages; i++ {
+		// Set offset according to the index in reservedPages
+		pages[i].offset = reservedPages[i]
+
+		// Set nextPage if the current page isn't the last one
+		// otherwise let it be nil
+		if i+1 < numPages {
+			pages[i].nextPage = &pages[i+1]
+		}
+
+		// Set pageStatus of the first page to pageStatusWritten
+		if i == 0 {
+			pages[i].pageStatus = pageStatusWritten
+		} else {
+			pages[i].pageStatus = pageStatusOther
+		}
+
+		// Copy part of the update into the payload
+		payloadsize := maxPayloadSize
+		if len(data[i*maxPayloadSize:]) < payloadsize {
+			payloadsize = len(data[i*maxPayloadSize:])
+		}
+		pages[i].payload = make([]byte, payloadsize)
+		copy(pages[i].payload, data[i*maxPayloadSize:])
+	}
+
+	return pages
 }
 
 // UnmarshalPage is a helper function that unmarshals the page and returns the offset of the next one
@@ -302,7 +336,6 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 
 		// Determine if the last page was reached and set the final page of the txn accordingly
 		if npo == math.MaxUint64 {
-			txn.finalPage = p
 			p.nextPage = nil
 			p = nil
 			break
@@ -330,9 +363,6 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 	p = txn.firstPage
 	for p.nextPage != nil {
 		p = p.nextPage
-	}
-	if p.offset != txn.finalPage.offset {
-		panic("sanity check failed. firstPage doesn't lead to finalPage")
 	}
 
 	// Verify the checksum before unmarshalling the updates. Otherwise we might

@@ -74,23 +74,15 @@ type Transaction struct {
 	commitComplete  bool
 	releaseComplete bool
 
-	// firstPage and finalPage can be the same page. When committing the
-	// transaction, the first page is updated to indicate that the commitment
-	// is complete, and the final page is updated to have an update number (so
-	// that when loaded later, the pages can be returned in the correct
-	// order) and the checksum on the final page is added which covers all of
-	// the data of the whole transaction.
-	//
-	// The middle pages do not change after being written.
+	// firstPage is the first page of the transaction. It is the last page that
+	// is written when finalizing a commit and when releasing a transaction.
 	firstPage *page
-	finalPage *page
 
 	// Updates defines the set of updates that compose the transaction.
 	Updates []Update
 
 	// The wal that was used to create the transaction
 	wal *WAL
-
 	// An internal channel to signal that the transaction was initialized and
 	// can be committed
 	initComplete chan error
@@ -115,18 +107,16 @@ func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
 	return crypto.HashBytes(data), nil
 }
 
-//commit commits a transaction by setting the correct status and checksum
+// commit commits a transaction by setting the correct status and checksum
 func (t *Transaction) commit(done chan error) {
 	// Signal completion of the commit
 	defer close(done)
 
 	// Make sure that the initialization of the transaction finished
-	select {
-	case err := <-t.initComplete:
-		if err != nil {
-			done <- err
-			return
-		}
+	err := <-t.initComplete
+	if err != nil {
+		done <- err
+		return
 	}
 
 	// set the status of the first page first
@@ -138,8 +128,8 @@ func (t *Transaction) commit(done chan error) {
 	// calculate the checksum and write it to the first page
 	checksum, err := t.checksum()
 	if err != nil {
-		// Don't return here to avoid a deadlock. Do it after the counter was increased
 		done <- build.ExtendErr("Unable to create checksum of transaction", err)
+		return
 	}
 	t.firstPage.transactionChecksum = checksum
 
@@ -147,13 +137,11 @@ func (t *Transaction) commit(done chan error) {
 	// there have been no errors so far.
 	if t.wal.deps.disrupt("CommitFail") {
 		// Disk failure causes the commit to fail
-		err = errors.New("Write failed on purpose")
+		done <- errors.New("Write failed on purpose")
+		return
 	}
 
-	if err == nil {
-		err = t.firstPage.Write(t.wal.logFile)
-	}
-
+	err = t.firstPage.writeToFile(t.wal.logFile)
 	if err != nil {
 		done <- build.ExtendErr("Writing the first page failed", err)
 		return
@@ -242,7 +230,7 @@ func unmarshalUpdates(data []byte) ([]Update, error) {
 // transactions's updates into a payload and splits the payload equally among
 // the pages. Once finished those pages are written to disk and the transaction
 // is committed.
-func threadedInitTransaction(t *Transaction) {
+func initTransaction(t *Transaction) {
 	defer close(t.initComplete)
 
 	// Marshal all the updates to get their total length on disk
@@ -252,60 +240,23 @@ func threadedInitTransaction(t *Transaction) {
 		return
 	}
 
-	// Find out how many pages are needed for the update
-	requiredPages := uint64(float64(len(data))/float64(maxPayloadSize+8) + 1)
-
 	// Get the pages from the wal
-	reservedPages := t.wal.reservePages(requiredPages)
-
-	// Set the fields of each page
-	pages := make([]page, requiredPages)
-	for i := uint64(0); i < requiredPages; i++ {
-		// Set offset according to the index in reservedPages
-		pages[i].offset = reservedPages[i]
-
-		// Set nextPage if the current page isn't the last one
-		// otherwise let it be nil
-		if i+1 < requiredPages {
-			pages[i].nextPage = &pages[i+1]
-		}
-
-		// Set pageStatus of the first page to pageStatusWritten
-		if i == 0 {
-			pages[i].pageStatus = pageStatusWritten
-		} else {
-			pages[i].pageStatus = pageStatusOther
-		}
-
-		// Copy part of the update into the payload
-		payloadsize := maxPayloadSize
-		if len(data[i*maxPayloadSize:]) < payloadsize {
-			payloadsize = len(data[i*maxPayloadSize:])
-		}
-		pages[i].payload = make([]byte, payloadsize)
-		copy(pages[i].payload, data[i*maxPayloadSize:])
-	}
+	pages := t.wal.managedReservePages(data)
 
 	// Set the first and final page of the transaction
 	t.firstPage = &pages[0]
-	t.finalPage = &pages[len(pages)-1]
 
 	// write the pages to disk and set the pageStatus
-	page := t.firstPage
-	for page != nil {
-		err := page.Write(t.wal.logFile)
-		if err != nil {
-			t.initComplete <- build.ExtendErr("Couldn't write the page to file", err)
-			return
-		}
-		page = page.nextPage
+	if err := t.writeToFile(); err != nil {
+		t.initComplete <- build.ExtendErr("Couldn't write the page to file", err)
+		return
 	}
 }
 
 // validateChecksum checks if a transaction has been corrupted by computing a hash
 // and comparing it to the one in the firstPage of the transaction
 func (t Transaction) validateChecksum() error {
-	// Check if finalPage is set
+	// Check if firstPage is set
 	if t.firstPage == nil {
 		return errors.New("Couldn't verify checksum. firstPage is nil")
 	}
@@ -319,6 +270,58 @@ func (t Transaction) validateChecksum() error {
 	return nil
 }
 
+// SignalUpdatesApplied  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
+func (t *Transaction) SignalUpdatesApplied() error {
+	if !t.setupComplete || !t.commitComplete || t.releaseComplete {
+		panic("misuse of transaction - call each of the signaling methods exactly once, in serial, in order")
+	}
+	t.releaseComplete = true
+
+	// Set the page status to applied
+	t.firstPage.pageStatus = pageStatusApplied
+
+	// Write the page to disk
+	var err error
+	if t.wal.deps.disrupt("ReleaseFail") {
+		// Disk failure causes the commit to fail
+		err = errors.New("Write failed on purpose")
+	} else {
+		err = t.firstPage.writeToFile(t.wal.logFile)
+	}
+
+	if err != nil {
+		return build.ExtendErr("Couldn't write the page to file", err)
+	}
+
+	t.wal.fSync()
+	// Update the wallets available pages
+	page := t.firstPage
+	t.wal.mu.Lock()
+	for page != nil {
+		// Append the index of the freed page
+		t.wal.availablePages = append(t.wal.availablePages, page.offset)
+		page = page.nextPage
+	}
+	t.wal.mu.Unlock()
+
+	return nil
+}
+
+// SignalSetupComplete will signal to the WAL that any required setup has
+// completed, and that the WAL can safely commit to the transaction being
+// applied atomically.
+func (t *Transaction) SignalSetupComplete() <-chan error {
+	if t.setupComplete || t.commitComplete || t.releaseComplete {
+		panic("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")
+	}
+	t.setupComplete = true
+
+	// Commit the transaction non-blocking
+	done := make(chan error)
+	go t.commit(done)
+	return done
+}
+
 // NewTransaction creates a transaction from a set of updates
 func (w *WAL) NewTransaction(updates []Update) *Transaction {
 	// Create new transaction
@@ -330,63 +333,21 @@ func (w *WAL) NewTransaction(updates []Update) *Transaction {
 
 	// Initialize the transaction by splitting up the payload among free pages
 	// and writing them to disk.
-	go threadedInitTransaction(&newTransaction)
+	go initTransaction(&newTransaction)
 
 	return &newTransaction
 }
 
-// SignalUpdatesApplied  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
-func (t *Transaction) SignalUpdatesApplied() <-chan error {
-	if !t.setupComplete || !t.commitComplete || t.releaseComplete {
-		panic("misuse of transaction - call each of the signaling methods exactly once, in serial, in order")
-	}
-	t.releaseComplete = true
-	notifyChannel := make(chan error)
-
-	go func() {
-		// Set the page status to applied
-		t.firstPage.pageStatus = pageStatusApplied
-
-		// Write the page to disk
-		var err error
-		if t.wal.deps.disrupt("ReleaseFail") {
-			// Disk failure causes the commit to fail
-			err = errors.New("Write failed on purpose")
-		} else {
-			err = t.firstPage.Write(t.wal.logFile)
-		}
-
+// writeToFile writes all the pages of the transaction to disk
+func (t *Transaction) writeToFile() error {
+	page := t.firstPage
+	for page != nil {
+		err := page.writeToFile(t.wal.logFile)
 		if err != nil {
-			notifyChannel <- build.ExtendErr("Couldn't write the page to file", err)
-			return
+			return err
 		}
-		t.wal.fSync()
-		// Update the wallets available pages
-		page := t.firstPage
-		t.wal.mu.Lock()
-		for page != nil {
-			// Append the index of the freed page
-			t.wal.availablePages = append(t.wal.availablePages, page.offset)
-			page = page.nextPage
-		}
-		t.wal.mu.Unlock()
-		notifyChannel <- nil
-	}()
-	return notifyChannel
-}
-
-// SignalSetupComplete will signal to the WAL that any required setup has
-// completed, and that the WAL can safely commit to the transaction being
-// applied atomically.
-func (t *Transaction) SignalSetupComplete() <-chan error {
-	if t.setupComplete || t.commitComplete || t.releaseComplete {
-		panic("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")
+		page = page.nextPage
 	}
-	t.setupComplete = true
-	done := make(chan error)
 
-	// Commit the transaction non-blocking
-	go t.commit(done)
-
-	return done
+	return nil
 }
