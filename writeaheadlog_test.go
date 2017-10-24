@@ -3,8 +3,11 @@ package wal
 import (
 	"bytes"
 	"encoding/json"
+	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,35 +16,50 @@ import (
 	"github.com/NebulousLabs/fastrand"
 )
 
+// dependencyCommitFail corrupts the first page of a transaction when it
+// is committed
+type dependencyCommitFail struct {
+	prodDependencies
+}
+
+func (dependencyCommitFail) disrupt(s string) bool {
+	if s == "CommitFail" {
+		return true
+	}
+	return false
+}
+
+// dependencyReleaseFail corrupts the first page of a transaction when it
+// is released
+type dependencyReleaseFail struct {
+	prodDependencies
+}
+
+func (dependencyReleaseFail) disrupt(s string) bool {
+	if s == "ReleaseFail" {
+		return true
+	}
+	return false
+}
+
 // walTester holds a WAL along with some other fields
 // useful for testing, and has methods implemented on it that can assist
 // testing.
 type walTester struct {
 	wal *WAL
 
-	updates    []Update
-	logpath    string
-	walStopped chan struct{}
-	cancel     chan struct{}
+	updates []Update
+	logpath string
 }
 
 // Close is a helper function for a clean tester shutdown
 func (wt *walTester) Close() {
-	// Signal the wal to stop
-	close(wt.cancel)
-
-	// Wait for the wal to shutdown
-	select {
-	case <-wt.walStopped:
-	}
+	// Close wal
+	wt.wal.Close()
 }
 
-// newContractManagerTester returns a ready-to-rock contract manager tester.
-func newWALTester(name string, settings map[string]bool) (*walTester, error) {
-	if testing.Short() {
-		panic("use of newContractManagerTester during short testing")
-	}
-
+// newWalTester returns a ready-to-rock walTester.
+func newWALTester(name string, deps dependencies) (*walTester, error) {
 	// Create temp dir
 	testdir := build.TempDir("wal", name)
 	err := os.MkdirAll(testdir, 0700)
@@ -54,18 +72,14 @@ func newWALTester(name string, settings map[string]bool) (*walTester, error) {
 	log := persist.NewLogger(&buf)
 
 	logpath := filepath.Join(testdir, "log.wal")
-	walStopped := make(chan struct{})
-	cancel := make(chan struct{})
-	updates, wal, err := New(logpath, log, cancel, walStopped, settings)
+	updates, wal, err := newWal(logpath, log, deps)
 	if err != nil {
 		return nil, err
 	}
 	cmt := &walTester{
-		wal:        wal,
-		logpath:    logpath,
-		updates:    updates,
-		walStopped: walStopped,
-		cancel:     cancel,
+		wal:     wal,
+		logpath: logpath,
+		updates: updates,
 	}
 	return cmt, nil
 }
@@ -80,14 +94,111 @@ func transactionPages(txn *Transaction) (pages []page) {
 	return
 }
 
-// TestTransactionInterrupted checks if an interrupt between committing and releasing a
-// transaction is handled correctly upon reboot
-func TestTransactionInterrupted(t *testing.T) {
-	settings := make(map[string]bool)
-	settings["cleanWALFile"] = true
-	wt, err := newWALTester(t.Name(), settings)
+// TestCommitFailed checks if a corruption of the first page of the
+// transaction during the commit is handled correctly
+func TestCommitFailed(t *testing.T) {
+	wt, err := newWALTester(t.Name(), dependencyCommitFail{})
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create the transaction
+	txn := wt.wal.NewTransaction(updates)
+
+	// Committing the txn should fail on purpose
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err == nil {
+		t.Error("SignalSetupComplete should have failed but didn't")
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// make sure the wal is still there
+	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.logpath)
+	}
+
+	// Restart it. No unfinished updates should be reported since they were
+	// never committed
+	updates2, w, err := New(wt.logpath, wt.wal.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != 0 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
+	}
+}
+
+// TestReleaseFailed checks if a corruption of the first page of the
+// transaction during the commit is handled correctly
+func TestReleaseFailed(t *testing.T) {
+	wt, err := newWALTester(t.Name(), dependencyReleaseFail{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create the transaction
+	txn := wt.wal.NewTransaction(updates)
+
+	// Committing the txn should fail on purpose
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	// Committing the txn should fail on purpose
+	if err := txn.SignalUpdatesApplied(); err == nil {
+		t.Error("SignalUpdatesApplies should have failed but didn't")
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// make sure the wal is still there
+	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.logpath)
+	}
+
+	// Restart it. There should be 1 unfinished update since it was committed
+	// but never released
+	updates2, w, err := New(wt.logpath, wt.wal.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != 1 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
+	}
+}
+
+// TestReleaseNotCalled checks if an interrupt between committing and releasing a
+// transaction is handled correctly upon reboot
+func TestReleaseNotCalled(t *testing.T) {
+	wt, err := newWALTester(t.Name(), prodDependencies{})
+	if err != nil {
+		t.Fatal(err)
 	}
 	// Create a transaction with 1 update
 	updates := []Update{}
@@ -111,8 +222,7 @@ func TestTransactionInterrupted(t *testing.T) {
 	}
 
 	// release the changes of the second transaction
-	wait2 = txn2.SignalApplyComplete()
-	if err := <-wait2; err != nil {
+	if err := txn2.SignalUpdatesApplied(); err != nil {
 		t.Errorf("SignalApplyComplete for the second transaction failed")
 	}
 
@@ -125,11 +235,11 @@ func TestTransactionInterrupted(t *testing.T) {
 	}
 
 	// Restart it and check if exactly 1 unfinished transaction is reported
-	cancel2 := make(chan struct{})
-	updates2, _, err := New(wt.logpath, wt.wal.log, cancel2, make(chan struct{}), make(map[string]bool))
+	updates2, w, err := New(wt.logpath, wt.wal.log)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+	defer w.Close()
 
 	if len(updates2) != len(updates) {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
@@ -137,15 +247,128 @@ func TestTransactionInterrupted(t *testing.T) {
 	}
 }
 
+// TestPayloadCorrupted creates 2 update and corrupts the first one. Therefore
+// no unfinished transactions should be reported because the second one is
+// assumed to be corrupted too
+func TestPayloadCorrupted(t *testing.T) {
+	wt, err := newWALTester(t.Name(), prodDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create 2 txns
+	txn := wt.wal.NewTransaction(updates)
+	txn2 := wt.wal.NewTransaction(updates)
+
+	// Committing the txns but don't release them
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	wait = txn2.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	// Corrupt the payload of the first txn
+	txn.firstPage.payload = fastrand.Bytes(2000)
+	if err := txn.firstPage.writeToFile(wt.wal.logFile); err != nil {
+		t.Errorf("Corrupting the page failed %v", err)
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// make sure the wal is still there
+	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.logpath)
+	}
+
+	// Restart it. 1 unfinished transaction should be reported
+	updates2, w, err := New(wt.logpath, wt.wal.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != 1 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
+	}
+}
+
+// TestPayloadCorrupted2 creates 2 update and corrupts the second one. Therefore
+// one unfinished transaction should be reported
+func TestPayloadCorrupted2(t *testing.T) {
+	wt, err := newWALTester(t.Name(), prodDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(1234),
+	})
+
+	// Create 2 txns
+	txn := wt.wal.NewTransaction(updates)
+	txn2 := wt.wal.NewTransaction(updates)
+
+	// Committing the txns but don't release them
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	wait = txn2.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete failed %v", err)
+	}
+
+	// Corrupt the payload of the second txn
+	txn2.firstPage.payload = fastrand.Bytes(2000)
+	if err := txn2.firstPage.writeToFile(wt.wal.logFile); err != nil {
+		t.Errorf("Corrupting the page failed %v", err)
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// make sure the wal is still there
+	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.logpath)
+	}
+
+	// Restart it. 1 Unfinished transaction should be reported.
+	updates2, w, err := New(wt.logpath, wt.wal.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != 1 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			0, len(updates2))
+	}
+}
+
 // TestWalParallel checks if the wal still works without errors under a high load parallel work
 // The wal won't be deleted but reloaded instead to check if the amount of returned failed updates
 // equals 0
 func TestWalParallel(t *testing.T) {
-	cancel := make(chan struct{})
-	settings := make(map[string]bool)
-	settings["cleanWALFile"] = true
-	walStopped := make(chan struct{})
-	wt, err := newWALTester(t.Name(), settings)
+	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -168,7 +391,7 @@ func TestWalParallel(t *testing.T) {
 			done <- err
 			return
 		}
-		if err := <-txn.SignalApplyComplete(); err != nil {
+		if err := txn.SignalUpdatesApplied(); err != nil {
 			done <- err
 			return
 		}
@@ -176,7 +399,7 @@ func TestWalParallel(t *testing.T) {
 	}
 
 	// Create numThreads instances of the function and wait for it to complete without error
-	numThreads := 10000
+	numThreads := 1000
 	for i := 0; i < numThreads; i++ {
 		go f()
 	}
@@ -194,8 +417,7 @@ func TestWalParallel(t *testing.T) {
 	}
 
 	// shutdown the wal
-	close(cancel)
-	<-walStopped
+	wt.Close()
 
 	// Get the fileinfo
 	fi, err := os.Stat(wt.logpath)
@@ -208,11 +430,12 @@ func TestWalParallel(t *testing.T) {
 	t.Logf("used pages: %v", wt.wal.filePageCount)
 
 	// Restart it and check that no unfinished transactions are reported
-	cancel2 := make(chan struct{})
-	updates2, _, err := New(wt.logpath, wt.wal.log, cancel2, make(chan struct{}), make(map[string]bool))
+	updates2, w, err := New(wt.logpath, wt.wal.log)
 	if err != nil {
 		t.Error(err)
 	}
+	defer w.Close()
+
 	if len(updates2) != 0 {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
 			0, len(updates2))
@@ -221,10 +444,11 @@ func TestWalParallel(t *testing.T) {
 
 // TestPageRecycling checks if pages are actually freed and used again after a transaction was applied
 func TestPageRecycling(t *testing.T) {
-	wt, err := newWALTester(t.Name(), make(map[string]bool))
+	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
+	defer wt.Close()
 
 	// Prepare a random update
 	updates := []Update{}
@@ -246,7 +470,7 @@ func TestPageRecycling(t *testing.T) {
 		t.Errorf("Number of available pages should be 0 but was %v", len(wt.wal.availablePages))
 	}
 
-	if err := <-txn.SignalApplyComplete(); err != nil {
+	if err := txn.SignalUpdatesApplied(); err != nil {
 		t.Errorf("SignalApplyComplete failed: %v", err)
 	}
 
@@ -271,7 +495,7 @@ func TestPageRecycling(t *testing.T) {
 	if len(wt.wal.availablePages) != 0 {
 		t.Errorf("Number of available pages should be 0 but was %v", len(wt.wal.availablePages))
 	}
-	if err := <-txn2.SignalApplyComplete(); err != nil {
+	if err := txn2.SignalUpdatesApplied(); err != nil {
 		t.Errorf("SignalApplyComplete failed: %v", err)
 	}
 
@@ -284,16 +508,17 @@ func TestPageRecycling(t *testing.T) {
 
 // TestRestoreTransactions checks that restoring transactions from a WAL works correctly
 func TestRestoreTransactions(t *testing.T) {
-	wt, err := newWALTester(t.Name(), make(map[string]bool))
+	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
+	defer wt.Close()
 
 	// Create 10 transactions with 1 update each
 	txns := []Transaction{}
 	totalPages := []page{}
 	totalUpdates := []Update{}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 2; i++ {
 		updates := []Update{}
 		updates = append(updates, Update{
 			Name:         "test",
@@ -301,6 +526,7 @@ func TestRestoreTransactions(t *testing.T) {
 			Instructions: fastrand.Bytes(5000), // ensures that 2 pages will be created
 		})
 		totalUpdates = append(totalUpdates, updates...)
+
 		// Create a new transaction
 		txn := wt.wal.NewTransaction(updates)
 		wait := txn.SignalSetupComplete()
@@ -317,16 +543,21 @@ func TestRestoreTransactions(t *testing.T) {
 		txns = append(txns, *txn)
 	}
 
-	// create a dictionary that takes a page offset and maps it to the page that points to that offset
-	previousPages := make(map[uint64]page)
-	for _, page := range totalPages {
-		if page.nextPage != nil {
-			previousPages[page.nextPage.offset] = page
-		}
+	// restore the transactions
+	recoveredTxns := []Transaction{}
+	logData, err := ioutil.ReadFile(wt.logpath)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// restore the transactions
-	recoveredTxns, err := wt.wal.restoreTransactions(totalPages, previousPages)
+	for _, txn := range txns {
+		var restoredTxn Transaction
+		err := unmarshalTransaction(&restoredTxn, txn.firstPage, txn.firstPage.nextPage.offset, logData)
+		if err != nil {
+			t.Error(err)
+		}
+		recoveredTxns = append(recoveredTxns, restoredTxn)
+	}
 
 	// check if the recovered transactions have the same length as before
 	if len(recoveredTxns) != len(txns) {
@@ -339,20 +570,9 @@ func TestRestoreTransactions(t *testing.T) {
 		if txn.firstPage == nil {
 			t.Errorf("%v: The firstPage of the txn is nil", i)
 		}
-		if txn.finalPage == nil {
-			t.Errorf("%v: The finalPage of the txn is nil", i)
-		}
 		if txn.firstPage.pageStatus != txns[i].firstPage.pageStatus {
 			t.Errorf("%v: The pageStatus of the txn is %v but should be",
 				txn.firstPage.pageStatus, txns[i].firstPage.pageStatus)
-		}
-		if txn.finalPage.transactionNumber != txns[i].finalPage.transactionNumber {
-			t.Errorf("%v: The transactionNumber of the txn is %v but should be",
-				txn.finalPage.transactionNumber, txns[i].finalPage.transactionNumber)
-		}
-		if txn.finalPage.transactionChecksum != txns[i].finalPage.transactionChecksum {
-			t.Errorf("%v: The transactionChecksum of the txn is %v but should be",
-				txn.finalPage.transactionChecksum, txns[i].finalPage.transactionChecksum)
 		}
 	}
 
@@ -368,7 +588,7 @@ func TestRestoreTransactions(t *testing.T) {
 		}
 		// Unmarshal the updates of the current transaction
 		var currentUpdates []Update
-		err := json.Unmarshal(updateBytes, &currentUpdates)
+		currentUpdates, err := unmarshalUpdates(updateBytes)
 		if err != nil {
 			t.Errorf("Unmarshal of updates failed %v", err)
 		}
@@ -390,13 +610,277 @@ func TestRestoreTransactions(t *testing.T) {
 	if bytes.Compare(originalData, recoveredData) != 0 {
 		t.Errorf("The recovered data doesn't match the original data")
 	}
+}
 
-	// shutdown the wal
-	close(wt.cancel)
-	time.Sleep(time.Second)
+// benchmarkTransactionSpeed is a helper function to create benchmarks that run
+// for 1 min to find out how many transactions can be applied to the wal and
+// how large the wal grows during that time using a certain number of threads.
+func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
+	b.Logf("Running benchmark with %v threads", numThreads)
 
-	// make sure the wal is gone
-	if _, err := os.Stat(wt.logpath); !os.IsNotExist(err) {
-		t.Error("wal was not deleted after clean shutdown")
+	wt, err := newWALTester(b.Name(), prodDependencies{})
+	if err != nil {
+		b.Error(err)
 	}
+	defer wt.Close()
+
+	// Prepare a random update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(4000), // 1 page / txn
+	})
+
+	// Define a function that creates a transaction from this update and
+	// applies it. It returns the duration it took to commit the transaction.
+	f := func() (latency time.Duration, err error) {
+		// Get start time
+		startTime := time.Now()
+		// Create txn
+		txn := wt.wal.NewTransaction(updates)
+		// Wait for the txn to be committed
+		if err = <-txn.SignalSetupComplete(); err != nil {
+			return
+		}
+		// Calculate latency after committing
+		latency = time.Since(startTime)
+		if err = txn.SignalUpdatesApplied(); err != nil {
+			return
+		}
+		return latency, nil
+	}
+
+	// Create a channel to stop threads
+	stop := make(chan struct{})
+
+	// Create atomic variables to count transactions and errors
+	var atomicNumTxns uint64
+	var atomicNumErr uint64
+
+	// Create waitgroup to wait for threads before reading the counters
+	var wg sync.WaitGroup
+
+	// Save latencies
+	latencies := make([]time.Duration, numThreads, numThreads)
+
+	// Start threads
+	for i := 0; i < numThreads; i++ {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			for {
+				// Check for stop signal
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// Execute the function
+				latency, err := f()
+				if err != nil {
+					// Abort thread on error
+					atomic.AddUint64(&atomicNumErr, 1)
+					return
+				}
+				atomic.AddUint64(&atomicNumTxns, 1)
+
+				// Remember highest latency
+				if latency > latencies[j] {
+					latencies[j] = latency
+				}
+			}
+		}(i)
+	}
+
+	// Kill threads after 1 minute
+	select {
+	case <-time.After(time.Minute):
+		close(stop)
+	}
+
+	// Wait for each thread to finish
+	wg.Wait()
+
+	// Check if any errors happened
+	if atomicNumErr > 0 {
+		b.Fatalf("%v errors happened during execution", atomicNumErr)
+	}
+
+	// Get the fileinfo
+	fi, err := os.Stat(wt.logpath)
+	if os.IsNotExist(err) {
+		b.Errorf("wal was deleted but shouldn't have")
+	}
+
+	// Find the maximum latency it took to commit a transaction
+	var maxLatency time.Duration
+	for i := 0; i < numThreads; i++ {
+		if latencies[i] > maxLatency {
+			maxLatency = latencies[i]
+		}
+	}
+
+	// Log results
+	b.Logf("filesize: %v mb", float64(fi.Size())/float64(1e+6))
+	b.Logf("used pages: %v", wt.wal.filePageCount)
+	b.Logf("total transactions: %v", atomicNumTxns)
+	b.Logf("txn/s: %v", float64(atomicNumTxns)/60.0)
+	b.Logf("maxLatency: %v", maxLatency)
+
+}
+
+// BenchmarkTransactionSpeed1 runs benchmarkTransactionSpeed with 1
+//
+// Results (Model, txn/s, maxLatency(ms), date)
+//
+// ST1000DM003 , 15.5  , 125.49, 09/17/2017
+// MZVLW512HMJP, 175.28, 15.4  , 09/17/2017
+//
+func BenchmarkTransactionSpeed1(b *testing.B) {
+	benchmarkTransactionSpeed(b, 1)
+}
+
+// BenchmarkTransactionSpeed10 runs benchmarkTransactionSpeed with 10
+// threads
+//
+// Results (Model, txn/s, maxLatency(ms), date)
+//
+// ST1000DM003 , 140.6  , 125.86, 09/17/2017
+// MZVLW512HMJP, 1437.35, 18.07 , 09/17/2017
+//
+func BenchmarkTransactionSpeed10(b *testing.B) {
+	benchmarkTransactionSpeed(b, 10)
+}
+
+// BenchmarkTransactionSpeed100 runs benchmarkTransactionSpeed with 100
+// threads
+//
+// Results (Model, txn/s, maxLatency(ms), date)
+//
+// ST1000DM003 , 1285   , 209.37, 09/17/2017
+// MZVLW512HMJP, 7589.93, 160.18, 09/17/2017
+//
+func BenchmarkTransactionSpeed100(b *testing.B) {
+	benchmarkTransactionSpeed(b, 100)
+}
+
+// BenchmarkTransactionSpeed1000 runs benchmarkTransactionSpeed with 1000
+//
+// Results (Model, txn/s, maxLatency(ms), date)
+//
+// ST1000DM003 , 3486   , 461.38, 09/17/2017
+// MZVLW512HMJP, 6101.05, 1479.8, 09/17/2017
+//
+func BenchmarkTransactionSpeed1000(b *testing.B) {
+	benchmarkTransactionSpeed(b, 1000)
+}
+
+// benchmarkDiskWrites writes numThreads pages of pageSize size and spins up 1
+// goroutine for each page that overwrites it numWrites times
+func benchmarkDiskWrites(b *testing.B, numWrites int, pageSize int, numThreads int) {
+	b.Logf("Starting benchmark with %v writes and %v threads for pages of size %v",
+		numWrites, numThreads, pageSize)
+
+	// Get a tmp dir path
+	tmpdir := build.TempDir("wal")
+
+	// Create dir
+	err := os.MkdirAll(tmpdir, 0700)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Create a tmp file
+	f, err := os.Create(tmpdir + "/wal.dat")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Close it after test
+	defer f.Close()
+
+	// Write numThreads pages to file
+	_, err = f.Write(fastrand.Bytes(pageSize * numThreads))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Sync it
+	if err = f.Sync(); err != nil {
+		b.Fatal(err)
+	}
+
+	// Define random page data
+	data := fastrand.Bytes(pageSize)
+
+	// Declare a waitGroup for later
+	var wg sync.WaitGroup
+
+	// Count errors during execution
+	var atomicCounter uint64
+
+	// Declare a function that writes a page at the offset i * pageSize 4 times
+	write := func(i int) {
+		defer wg.Done()
+		for j := 0; j < numWrites; j++ {
+			if _, err = f.WriteAt(data, int64(i*pageSize)); err != nil {
+				atomic.AddUint64(&atomicCounter, 1)
+				return
+			}
+			if err = f.Sync(); err != nil {
+				atomic.AddUint64(&atomicCounter, 1)
+				return
+			}
+		}
+	}
+
+	// Reset the timer
+	b.ResetTimer()
+
+	// Create one thread for each page and make it overwrite the page and call sync
+	for i := 0; i < numThreads; i++ {
+		wg.Add(1)
+		go write(i)
+	}
+
+	// Wait for the threads and check if they were successfull
+	wg.Wait()
+	if atomicCounter > 0 {
+		b.Fatalf("%v errors happened during execution", atomicCounter)
+	}
+	// Get fileinfo
+	info, err := f.Stat()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Print some info
+	b.Logf("Number of threads: %v", numThreads)
+	b.Logf("PageSize: %v bytes", pageSize)
+	b.Logf("Filesize after benchmark %v", info.Size())
+}
+
+// BenchmarkDiskWrites1 starts benchmarkDiskWrites with 9990 threads, 4kib
+// pages and overwrites those pages once
+//
+// Results (Model, seconds, date)
+//
+// ST1000DM003 , 3.5, 09/17/2017
+// MZVLW512HMJP, 4.4, 09/17/2017
+//
+func BenchmarkDiskWrites1(b *testing.B) {
+	benchmarkDiskWrites(b, 1, 4096, 9990)
+}
+
+// BenchmarkDiskWrites4 starts benchmarkDiskWrites with 9990 threads, 4kib
+// pages and overwrites those pages 4 times
+//
+// Results (Model, seconds, date)
+//
+// ST1000DM003 , 56.4, 09/17/2017
+// MZVLW512HMJP, ??? , 09/17/2017	(results vary between 6 and 30 seconds)
+//
+func BenchmarkDiskWrites4(b *testing.B) {
+	benchmarkDiskWrites(b, 4, 4096, 9990)
 }
