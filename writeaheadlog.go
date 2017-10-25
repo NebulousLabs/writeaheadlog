@@ -123,9 +123,6 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 		// Reuse the existing wal
 		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
 
-		// Invalidate data in wal
-		newWal.logFile.Write(make([]byte, len(data)))
-
 		return updates, &newWal, err
 
 	} else if !os.IsNotExist(err) {

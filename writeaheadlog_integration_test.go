@@ -193,7 +193,7 @@ func TestWALIntegration(t *testing.T) {
 	}
 
 	// Create the countdown.
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 250; i++ {
 		cd, err := newCountdown(dir)
 		if err != nil {
 			t.Fatal(err)
