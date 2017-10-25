@@ -166,7 +166,6 @@ func readWALMetadata(data []byte) error {
 func (w *WAL) recover(data []byte) ([]Update, error) {
 	// Get all the first pages to sort them by txn number
 	var firstPages ByTxnNumber
-	var err error
 
 	// check if the data is long enough to contain the metadata
 	if len(data) < pageSize {
@@ -213,9 +212,12 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 	updates := []Update{}
 	for _, sp := range firstPages {
 		var txn Transaction
-		if err = unmarshalTransaction(&txn, sp.p, sp.nextPage, data); err == nil {
-			updates = append(updates, txn.Updates...)
+		err := unmarshalTransaction(&txn, sp.p, sp.nextPage, data)
+		if err != nil {
+			println(err.Error())
+			continue
 		}
+		updates = append(updates, txn.Updates...)
 	}
 	w.filePageCount = uint64(len(w.availablePages))
 

@@ -42,9 +42,9 @@ type countdownArray struct {
 	wal       *WAL
 }
 
-// addCount will increment every counter in the array, and then append a '1',
-// but using the wal to maintain consistency on disk.
-func (ca *countdownArray) addCount() error {
+// addBrokenCount is a copy of addCount, but we never apply the updates, and we
+// return an error.
+func (ca *countdownArray) addBrokenCount() error {
 	// Increment the count in memory, creating a list of updates as we go.
 	var updates []Update
 	for i := 0; i < len(ca.countdown); i++ {
@@ -64,7 +64,7 @@ func (ca *countdownArray) addCount() error {
 	// add to the count, just write out the file piece.
 	if len(updates) == 0 {
 		writeBytes := make([]byte, 8)
-		_, err := ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)-1))
+		_, err := ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)))
 		if err != nil {
 			return err
 		}
@@ -82,7 +82,64 @@ func (ca *countdownArray) addCount() error {
 	}
 	// Perform the setup write on the file.
 	writeBytes := make([]byte, 8)
-	_, err = ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)-1))
+	_, err = ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)))
+	if err != nil {
+		return err
+	}
+	err = ca.file.Sync()
+	if err != nil {
+		return err
+	}
+	// Signal completed setup and then wait for the commitment to finish.
+	errChan := tx.SignalSetupComplete()
+	err = <-errChan
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// addCount will increment every counter in the array, and then append a '1',
+// but using the wal to maintain consistency on disk.
+func (ca *countdownArray) addCount() error {
+	// Increment the count in memory, creating a list of updates as we go.
+	var updates []Update
+	for i := 0; i < len(ca.countdown); i++ {
+		ca.countdown[i]++
+		updates = append(updates, Update{
+			Name:    "addCountUpdate - with an intentionally extra long name to force updates in the WAL to be a lot larger than they would be otherwise.",
+			Version: "1.0.0",
+			Instructions: addCountUpdate{
+				index:    uint64(i),
+				newCount: ca.countdown[i],
+			}.marshal(),
+		})
+	}
+
+	// Corner case - if there are no updates, because this is the first time we
+	// add to the count, just write out the file piece.
+	if len(updates) == 0 {
+		writeBytes := make([]byte, 8)
+		_, err := ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)))
+		if err != nil {
+			return err
+		}
+		err = ca.file.Sync()
+		if err != nil {
+			return err
+		}
+		ca.countdown = append(ca.countdown, 0)
+		return nil
+	}
+
+	// Create the WAL transaction.
+	tx, err := ca.wal.NewTransaction(updates)
+	if err != nil {
+		return err
+	}
+	// Perform the setup write on the file.
+	writeBytes := make([]byte, 8)
+	_, err = ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)))
 	if err != nil {
 		return err
 	}
@@ -97,6 +154,7 @@ func (ca *countdownArray) addCount() error {
 		return err
 	}
 	// Apply the updates.
+	ca.countdown = append(ca.countdown, 0)
 	err = ca.applyUpdates(updates)
 	if err != nil {
 		return err
@@ -178,6 +236,9 @@ func newCountdown(dir string) (*countdownArray, error) {
 		if num != start-uint64(i) {
 			return nil, errors.New("count is incorrect representation")
 		}
+		if num == 0 {
+			ca.countdown = ca.countdown[:i+1]
+		}
 	}
 	return ca, nil
 }
@@ -192,19 +253,96 @@ func TestWALIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create the countdown.
-	for i := 0; i < 250; i++ {
+	// Create the countdown and extend the count out to 250, closing and
+	// re-opening the wal each time. The number of WAL pages required by each
+	// 'addCount' will incrase over time, giving good confidence that the WAL
+	// is correctly handling multi-page updates.
+	//
+	// 'newCountdown' will chcek that the file is consistent, and detect that
+	// updates are being applied correctly.
+	expectedCountdownLen := 1
+	for i := 0; i < 300; i++ {
 		cd, err := newCountdown(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
+		if len(cd.countdown) != expectedCountdownLen {
+			t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+		}
 		err = cd.addCount()
 		if err != nil {
 			t.Fatal(err)
+		}
+		expectedCountdownLen++
+		err = cd.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Continue increasing the count, but this time start performing multiple
+	// transactions between each opening and closing.
+	for i := 0; i < 10; i++ {
+		cd, err := newCountdown(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cd.countdown) != expectedCountdownLen {
+			t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+		}
+		for j := 0; j < i; j++ {
+			err = cd.addCount()
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedCountdownLen++
 		}
 		err = cd.Close()
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
+
+	// Test the durability of the WAL. We'll initialize to simulate a disk
+	// failure after the WAL commits, but before we are able to apply the
+	// commit.
+	for i := 0; i < 10; i++ {
+		cd, err := newCountdown(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cd.countdown) != expectedCountdownLen {
+			t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+		}
+
+		// Add some legitimate counts.
+		for j := 0; j < i; j++ {
+			err = cd.addCount()
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedCountdownLen++
+		}
+
+		// Add a broken count. Because the break is after the WAL commits, the
+		// count should still restore correctly on the next iteration where we
+		// call 'newCountdown'.
+		err = cd.addBrokenCount()
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectedCountdownLen++
+		err = cd.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Test the parallelism
 }
+
+// TODO: Do the count increasing thing but with one page updates.
+
+// TODO: Do the broken count thing, but with one page updates.
+
+// TODO: Do the parallelsim thing but with one page updates.
