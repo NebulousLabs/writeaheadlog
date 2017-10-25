@@ -43,9 +43,6 @@ type WAL struct {
 	// mu is used to lock the availablePages field of the wal
 	mu sync.Mutex
 
-	// log is used to log errors and warnings
-	log *persist.Logger
-
 	// syncCond is used to schedule the calls to fsync
 	syncCond *sync.Cond
 
@@ -105,11 +102,10 @@ func (w *WAL) allocatePages(numPages uint64) {
 }
 
 // newWal initializes and returns a wal.
-func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update, w *WAL, err error) {
+func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	// Create a new WAL
 	newWal := WAL{
 		deps:     deps,
-		log:      logger,
 		stopChan: make(chan struct{}),
 	}
 
@@ -118,10 +114,6 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 	// Try opening the WAL file.
 	data, err := deps.readFile(path)
 	if err == nil {
-		// err == nil indicates that there is a WAL file which can be recovered to determine
-		// if the shutdown was clean or not
-		newWal.log.Println("WARN: WAL file detected, performing recovery.")
-
 		// Recover WAL and return updates
 		updates, err := newWal.recover(data)
 		if err != nil {
@@ -403,9 +395,9 @@ func writeWALMetadata(f file) error {
 }
 
 // Close closes the wal and frees used resources
-func (w *WAL) Close() {
+func (w *WAL) Close() error {
 	close(w.stopChan)
-	w.logFile.Close()
+	return w.logFile.Close()
 }
 
 // New will open a WAL. If the previous run did not shut down cleanly, a set of
@@ -418,7 +410,7 @@ func (w *WAL) Close() {
 // simulating multiple consecutive unclean shutdowns. If the updates are
 // properly idempotent, there should be no functional difference between the
 // multiple appearances and them just being loaded a single time correctly.
-func New(path string, logger *persist.Logger) (u []Update, w *WAL, err error) {
+func New(path string) (u []Update, w *WAL, err error) {
 	// Create a wal with production dependencies
-	return newWal(path, logger, prodDependencies{})
+	return newWal(path, prodDependencies{})
 }

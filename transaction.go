@@ -323,7 +323,12 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 }
 
 // NewTransaction creates a transaction from a set of updates
-func (w *WAL) NewTransaction(updates []Update) *Transaction {
+func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
+	// Check that there are updates for the transaction to process.
+	if len(updates) == 0 {
+		return nil, errors.New("cannot create a transaction without updates")
+	}
+
 	// Create new transaction
 	newTransaction := Transaction{
 		Updates:      updates,
@@ -335,7 +340,7 @@ func (w *WAL) NewTransaction(updates []Update) *Transaction {
 	// and writing them to disk.
 	go initTransaction(&newTransaction)
 
-	return &newTransaction
+	return &newTransaction, nil
 }
 
 // writeToFile writes all the pages of the transaction to disk

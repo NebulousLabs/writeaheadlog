@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/NebulousLabs/Sia/build"
-	"github.com/NebulousLabs/Sia/persist"
 	"github.com/NebulousLabs/fastrand"
 )
 
@@ -49,7 +48,7 @@ type walTester struct {
 	wal *WAL
 
 	updates []Update
-	logpath string
+	path    string
 }
 
 // Close is a helper function for a clean tester shutdown
@@ -67,19 +66,15 @@ func newWALTester(name string, deps dependencies) (*walTester, error) {
 		return nil, err
 	}
 
-	// Create logger
-	var buf bytes.Buffer
-	log := persist.NewLogger(&buf)
-
-	logpath := filepath.Join(testdir, "log.wal")
-	updates, wal, err := newWal(logpath, log, deps)
+	path := filepath.Join(testdir, "test.wal")
+	updates, wal, err := newWal(path, deps)
 	if err != nil {
 		return nil, err
 	}
 	cmt := &walTester{
 		wal:     wal,
-		logpath: logpath,
 		updates: updates,
+		path:    path,
 	}
 	return cmt, nil
 }
@@ -111,7 +106,10 @@ func TestCommitFailed(t *testing.T) {
 	})
 
 	// Create the transaction
-	txn := wt.wal.NewTransaction(updates)
+	txn, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Committing the txn should fail on purpose
 	wait := txn.SignalSetupComplete()
@@ -123,13 +121,13 @@ func TestCommitFailed(t *testing.T) {
 	wt.Close()
 
 	// make sure the wal is still there
-	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
-		t.Errorf("wal was deleted at %v", wt.logpath)
+	if _, err := os.Stat(wt.path); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.path)
 	}
 
 	// Restart it. No unfinished updates should be reported since they were
 	// never committed
-	updates2, w, err := New(wt.logpath, wt.wal.log)
+	updates2, w, err := New(wt.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +156,10 @@ func TestReleaseFailed(t *testing.T) {
 	})
 
 	// Create the transaction
-	txn := wt.wal.NewTransaction(updates)
+	txn, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Committing the txn should fail on purpose
 	wait := txn.SignalSetupComplete()
@@ -175,13 +176,13 @@ func TestReleaseFailed(t *testing.T) {
 	wt.Close()
 
 	// make sure the wal is still there
-	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
-		t.Errorf("wal was deleted at %v", wt.logpath)
+	if _, err := os.Stat(wt.path); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.path)
 	}
 
 	// Restart it. There should be 1 unfinished update since it was committed
 	// but never released
-	updates2, w, err := New(wt.logpath, wt.wal.log)
+	updates2, w, err := New(wt.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,8 +209,14 @@ func TestReleaseNotCalled(t *testing.T) {
 		Instructions: fastrand.Bytes(1234),
 	})
 	// Create one transaction which will be committed and one that will be applied
-	txn := wt.wal.NewTransaction(updates)
-	txn2 := wt.wal.NewTransaction(updates)
+	txn, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn2, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// wait for the transactions to be committed
 	wait := txn.SignalSetupComplete()
@@ -230,12 +237,12 @@ func TestReleaseNotCalled(t *testing.T) {
 	wt.Close()
 
 	// make sure the wal is still there
-	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
-		t.Errorf("wal was deleted at %v", wt.logpath)
+	if _, err := os.Stat(wt.path); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.path)
 	}
 
 	// Restart it and check if exactly 1 unfinished transaction is reported
-	updates2, w, err := New(wt.logpath, wt.wal.log)
+	updates2, w, err := New(wt.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,8 +272,14 @@ func TestPayloadCorrupted(t *testing.T) {
 	})
 
 	// Create 2 txns
-	txn := wt.wal.NewTransaction(updates)
-	txn2 := wt.wal.NewTransaction(updates)
+	txn, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn2, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Committing the txns but don't release them
 	wait := txn.SignalSetupComplete()
@@ -289,12 +302,12 @@ func TestPayloadCorrupted(t *testing.T) {
 	wt.Close()
 
 	// make sure the wal is still there
-	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
-		t.Errorf("wal was deleted at %v", wt.logpath)
+	if _, err := os.Stat(wt.path); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.path)
 	}
 
 	// Restart it. 1 unfinished transaction should be reported
-	updates2, w, err := New(wt.logpath, wt.wal.log)
+	updates2, w, err := New(wt.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,8 +336,14 @@ func TestPayloadCorrupted2(t *testing.T) {
 	})
 
 	// Create 2 txns
-	txn := wt.wal.NewTransaction(updates)
-	txn2 := wt.wal.NewTransaction(updates)
+	txn, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn2, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Committing the txns but don't release them
 	wait := txn.SignalSetupComplete()
@@ -347,12 +366,12 @@ func TestPayloadCorrupted2(t *testing.T) {
 	wt.Close()
 
 	// make sure the wal is still there
-	if _, err := os.Stat(wt.logpath); os.IsNotExist(err) {
-		t.Errorf("wal was deleted at %v", wt.logpath)
+	if _, err := os.Stat(wt.path); os.IsNotExist(err) {
+		t.Errorf("wal was deleted at %v", wt.path)
 	}
 
 	// Restart it. 1 Unfinished transaction should be reported.
-	updates2, w, err := New(wt.logpath, wt.wal.log)
+	updates2, w, err := New(wt.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +404,11 @@ func TestWalParallel(t *testing.T) {
 	done := make(chan error)
 	f := func() {
 		// Create txn
-		txn := wt.wal.NewTransaction(updates)
+		txn, err := wt.wal.NewTransaction(updates)
+		if err != nil {
+			done <- err
+			return
+		}
 		// Wait for the txn to be committed
 		if err := <-txn.SignalSetupComplete(); err != nil {
 			done <- err
@@ -420,9 +443,9 @@ func TestWalParallel(t *testing.T) {
 	wt.Close()
 
 	// Get the fileinfo
-	fi, err := os.Stat(wt.logpath)
+	fi, err := os.Stat(wt.path)
 	if os.IsNotExist(err) {
-		t.Errorf("wal was deleted but shouldn't have")
+		t.Fatalf("wal was deleted but shouldn't have")
 	}
 
 	// Log some stats about the file
@@ -430,7 +453,7 @@ func TestWalParallel(t *testing.T) {
 	t.Logf("used pages: %v", wt.wal.filePageCount)
 
 	// Restart it and check that no unfinished transactions are reported
-	updates2, w, err := New(wt.logpath, wt.wal.log)
+	updates2, w, err := New(wt.path)
 	if err != nil {
 		t.Error(err)
 	}
@@ -459,7 +482,10 @@ func TestPageRecycling(t *testing.T) {
 	})
 
 	// Create txn
-	txn := wt.wal.NewTransaction(updates)
+	txn, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Wait for the txn to be committed
 	if err := <-txn.SignalSetupComplete(); err != nil {
 		t.Errorf("SignalSetupComplete failed: %v", err)
@@ -486,7 +512,10 @@ func TestPageRecycling(t *testing.T) {
 	}
 
 	// Create second txn
-	txn2 := wt.wal.NewTransaction(updates)
+	txn2, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Wait for the txn to be committed
 	if err := <-txn2.SignalSetupComplete(); err != nil {
 		t.Errorf("SignalSetupComplete failed: %v", err)
@@ -528,7 +557,10 @@ func TestRestoreTransactions(t *testing.T) {
 		totalUpdates = append(totalUpdates, updates...)
 
 		// Create a new transaction
-		txn := wt.wal.NewTransaction(updates)
+		txn, err := wt.wal.NewTransaction(updates)
+		if err != nil {
+			t.Fatal(err)
+		}
 		wait := txn.SignalSetupComplete()
 		if err := <-wait; err != nil {
 			t.Errorf("SignalSetupComplete failed %v", err)
@@ -545,7 +577,7 @@ func TestRestoreTransactions(t *testing.T) {
 
 	// restore the transactions
 	recoveredTxns := []Transaction{}
-	logData, err := ioutil.ReadFile(wt.logpath)
+	logData, err := ioutil.ReadFile(wt.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +670,10 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 		// Get start time
 		startTime := time.Now()
 		// Create txn
-		txn := wt.wal.NewTransaction(updates)
+		txn, err := wt.wal.NewTransaction(updates)
+		if err != nil {
+			return
+		}
 		// Wait for the txn to be committed
 		if err = <-txn.SignalSetupComplete(); err != nil {
 			return
@@ -708,7 +743,7 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 	}
 
 	// Get the fileinfo
-	fi, err := os.Stat(wt.logpath)
+	fi, err := os.Stat(wt.path)
 	if os.IsNotExist(err) {
 		b.Errorf("wal was deleted but shouldn't have")
 	}
