@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -201,6 +202,11 @@ func newCountdown(dir string) (*countdownArray, error) {
 		return nil, err
 	}
 
+	// Signal that the recovery is complete
+	if err := wal.RecoveryComplete(); err != nil {
+		return nil, err
+	}
+
 	// Create the countdownArray and apply any updates from the wal.
 	ca := &countdownArray{
 		file: file,
@@ -234,7 +240,8 @@ func newCountdown(dir string) (*countdownArray, error) {
 	}
 	for i, num := range ca.countdown {
 		if num != start-uint64(i) {
-			return nil, errors.New("count is incorrect representation")
+			return nil, fmt.Errorf("count is incorrect representation %v != %v - %v",
+				num, start, uint64(i))
 		}
 		if num == 0 {
 			ca.countdown = ca.countdown[:i+1]

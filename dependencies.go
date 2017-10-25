@@ -23,6 +23,7 @@ type (
 		ReadAt([]byte, int64) (int, error)
 		Sync() error
 		WriteAt([]byte, int64) (int, error)
+		Seek(int64, int) (int64, error)
 	}
 )
 
@@ -45,4 +46,8 @@ func (prodDependencies) create(path string) (file, error) {
 
 type prodFile struct {
 	*os.File
+}
+
+func (f *prodFile) Seek(offset int64, whence int) (int64, error) {
+	return f.Seek(offset, whence)
 }
