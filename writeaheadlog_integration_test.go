@@ -462,7 +462,7 @@ func TestWALIntegration(t *testing.T) {
 	// failure after the WAL commits, but before we are able to apply the
 	// commit.
 	if fastrand.Intn(2) != 0 {
-		for i := 0; i < 100; i++ {
+		for i := 0; i < 25; i++ {
 			cd, err := newCountdown(dir)
 			if err != nil {
 				t.Fatal(err)
@@ -492,6 +492,15 @@ func TestWALIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+		}
+
+		// Check at this point that the wal is less than 100 pages.
+		info, err := os.Stat(filepath.Join(dir, "wal.dat"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() > 100*pageSize {
+			t.Error("the wal is too large")
 		}
 	}
 
