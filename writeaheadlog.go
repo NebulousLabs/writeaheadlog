@@ -15,7 +15,6 @@ import (
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
-	"github.com/NebulousLabs/Sia/persist"
 	"github.com/NebulousLabs/errors"
 )
 
@@ -159,16 +158,13 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 // readWALMetadata reads WAL metadata from the input file, returning an error
 // if the result is unexpected.
 func readWALMetadata(data []byte) error {
-	var md persist.Metadata
-	decoder := json.NewDecoder(bytes.NewBuffer(data))
-	err := decoder.Decode(&md)
-	if err != nil {
+	var md metadata
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&md); err != nil {
 		return build.ExtendErr("error reading WAL metadata", err)
-	}
-	if md.Header != metadata.Header {
+	} else if md.Header != metadataHeader {
 		return errors.New("WAL metadata header does not match header found in WAL file")
-	}
-	if md.Version != metadata.Version {
+	} else if md.Version != metadataVersion {
 		return errors.New("WAL metadata version does not match version found in WAL file")
 	}
 	return nil
@@ -401,7 +397,11 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 
 // writeWALMetadata writes WAL metadata to the input file.
 func writeWALMetadata(f file) error {
-	changeBytes, err := json.MarshalIndent(metadata, "", "\t")
+	md := metadata{
+		Header:  metadataHeader,
+		Version: metadataVersion,
+	}
+	changeBytes, err := json.MarshalIndent(md, "", "\t")
 	if err != nil {
 		return build.ExtendErr("could not marshal WAL metadata", err)
 	}

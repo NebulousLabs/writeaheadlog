@@ -16,16 +16,13 @@ const (
 	pageStatusApplied
 )
 
-var (
-	// metadata defines the WAL v1.0.0 metadata
-	metadata = Metadata{
-		Header:  "WAL",
-		Version: "1.0.0",
-	}
+const (
+	metadataHeader  = "WAL"
+	metadataVersion = "1.0"
 )
 
-// Metadata contains the header and version of the data being stored.
-type Metadata struct {
+// metadata contains the header and version of the WAL.
+type metadata struct {
 	Header, Version string
 }
 
