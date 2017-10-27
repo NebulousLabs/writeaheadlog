@@ -31,7 +31,7 @@ type WAL struct {
 	// number of availablePages ever drops below the number of pages required
 	// for a new transaction, then the file is extended, new pages are added,
 	// and the availablePages array is updated to include the extended pages.
-	filePageCount uint64
+	filePageCount int
 
 	// atomicNextTxnNum is used to give every transaction a unique transaction
 	// number. The transaction will then wait until atomicTransactionCounter allows
@@ -101,10 +101,11 @@ func (p ByTxnNumber) Less(i, j int) bool {
 }
 
 // allocatePages creates new pages and adds them to the available pages of the wal
-func (w *WAL) allocatePages(numPages uint64) {
+func (w *WAL) allocatePages(numPages int) {
 	// Starting at index 1 because the first page is reserved for metadata
-	for i := w.filePageCount + 1; i < w.filePageCount+numPages+1; i++ {
-		w.availablePages = append(w.availablePages, i*pageSize)
+	start := w.filePageCount + 1
+	for i := start; i < start+numPages; i++ {
+		w.availablePages = append(w.availablePages, uint64(i)*pageSize)
 	}
 	w.filePageCount += numPages
 }
@@ -260,32 +261,30 @@ func (w *WAL) RecoveryComplete() error {
 // allocate new pages it will do so
 func (w *WAL) managedReservePages(data []byte) []page {
 	// Find out how many pages are needed for the payload
-	numPages := uint64(len(data) / maxPayloadSize)
+	numPages := len(data) / maxPayloadSize
 	if len(data)%maxPayloadSize != 0 {
 		numPages++
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	// Check if enough pages are available
-	if uint64(len(w.availablePages)) < numPages {
-		// Add enough pages for the new transaction
-		numNewPages := numPages - uint64(len(w.availablePages))
-		w.allocatePages(numNewPages)
+	// allocate more pages if necessary
+	if pagesNeeded := numPages - len(w.availablePages); pagesNeeded > 0 {
+		w.allocatePages(pagesNeeded)
 
-		// sanity check: the number of available pages should equal the number of required ones
-		if uint64(len(w.availablePages)) != numPages {
+		// sanity check: the number of available pages should now equal the number of required ones
+		if len(w.availablePages) != numPages {
 			panic(errors.New("sanity check failed: num of available pages != num of required pages"))
 		}
 	}
 
 	// Reserve some pages and remove them from the available ones
-	reservedPages := w.availablePages[uint64(len(w.availablePages))-numPages:]
-	w.availablePages = w.availablePages[:uint64(len(w.availablePages))-numPages]
+	reservedPages := w.availablePages[len(w.availablePages)-numPages:]
+	w.availablePages = w.availablePages[:len(w.availablePages)-numPages]
 
 	// Set the fields of each page
 	pages := make([]page, numPages)
-	for i := uint64(0); i < numPages; i++ {
+	for i := range pages {
 		// Set offset according to the index in reservedPages
 		pages[i].offset = reservedPages[i]
 

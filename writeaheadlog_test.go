@@ -439,7 +439,7 @@ func TestWalParallel(t *testing.T) {
 	}
 
 	// The number of available pages should equal the number of created pages
-	if wt.wal.filePageCount != uint64(len(wt.wal.availablePages)) {
+	if wt.wal.filePageCount != len(wt.wal.availablePages) {
 		t.Errorf("number of available pages doesn't match the number of created ones. Expected %v, but was %v",
 			wt.wal.availablePages, wt.wal.filePageCount)
 	}
@@ -512,7 +512,7 @@ func TestPageRecycling(t *testing.T) {
 		t.Errorf("The number of used pages should be greater than 0")
 	}
 	// Make sure usedPages equals availablePages and remember the values
-	if usedPages != uint64(availablePages) {
+	if usedPages != availablePages {
 		t.Errorf("number of used pages doesn't match number of available pages")
 	}
 

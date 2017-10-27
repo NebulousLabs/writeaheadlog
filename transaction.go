@@ -270,19 +270,16 @@ func (t *Transaction) SignalUpdatesApplied() error {
 	} else {
 		err = t.firstPage.writeToFile(t.wal.logFile)
 	}
-
 	if err != nil {
 		return build.ExtendErr("Couldn't write the page to file", err)
 	}
-
 	t.wal.fSync()
-	// Update the wallets available pages
-	page := t.firstPage
+
+	// Update the wal's available pages
 	t.wal.mu.Lock()
-	for page != nil {
+	for page := t.firstPage; page != nil; page = page.nextPage {
 		// Append the index of the freed page
 		t.wal.availablePages = append(t.wal.availablePages, page.offset)
-		page = page.nextPage
 	}
 	t.wal.mu.Unlock()
 
@@ -332,13 +329,10 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 
 // writeToFile writes all the pages of the transaction to disk
 func (t *Transaction) writeToFile() error {
-	page := t.firstPage
-	for page != nil {
-		err := page.writeToFile(t.wal.logFile)
-		if err != nil {
+	for page := t.firstPage; page != nil; page = page.nextPage {
+		if err := page.writeToFile(t.wal.logFile); err != nil {
 			return err
 		}
-		page = page.nextPage
 	}
 	return nil
 }
