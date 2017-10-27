@@ -11,6 +11,7 @@ import (
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
+	"github.com/NebulousLabs/fastrand"
 )
 
 const (
@@ -412,80 +413,86 @@ func TestWALIntegration(t *testing.T) {
 	// 'newCountdown' will chcek that the file is consistent, and detect that
 	// updates are being applied correctly.
 	expectedCountdownLen := 1
-	for i := 0; i < 300; i++ {
-		cd, err := newCountdown(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(cd.countdown) != expectedCountdownLen {
-			t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
-		}
-		err = cd.addCount()
-		if err != nil {
-			t.Fatal(err)
-		}
-		expectedCountdownLen++
-		err = cd.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Continue increasing the count, but this time start performing multiple
-	// transactions between each opening and closing.
-	for i := 0; i < 10; i++ {
-		cd, err := newCountdown(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(cd.countdown) != expectedCountdownLen {
-			t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
-		}
-		for j := 0; j < i; j++ {
+	if fastrand.Intn(3) != 0 {
+		for i := 0; i < 300; i++ {
+			cd, err := newCountdown(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cd.countdown) != expectedCountdownLen {
+				t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+			}
 			err = cd.addCount()
 			if err != nil {
 				t.Fatal(err)
 			}
 			expectedCountdownLen++
+			err = cd.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
-		err = cd.Close()
-		if err != nil {
-			t.Fatal(err)
+	}
+
+	// Continue increasing the count, but this time start performing multiple
+	// transactions between each opening and closing.
+	if fastrand.Intn(3) != 0 {
+		for i := 0; i < 10; i++ {
+			cd, err := newCountdown(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cd.countdown) != expectedCountdownLen {
+				t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+			}
+			for j := 0; j < i; j++ {
+				err = cd.addCount()
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedCountdownLen++
+			}
+			err = cd.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 
 	// Test the durability of the WAL. We'll initialize to simulate a disk
 	// failure after the WAL commits, but before we are able to apply the
 	// commit.
-	for i := 0; i < 10; i++ {
-		cd, err := newCountdown(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(cd.countdown) != expectedCountdownLen {
-			t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
-		}
+	if fastrand.Intn(3) != 0 {
+		for i := 0; i < 10; i++ {
+			cd, err := newCountdown(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cd.countdown) != expectedCountdownLen {
+				t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+			}
 
-		// Add some legitimate counts.
-		for j := 0; j < i; j++ {
-			err = cd.addCount()
+			// Add some legitimate counts.
+			for j := 0; j < i; j++ {
+				err = cd.addCount()
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedCountdownLen++
+			}
+
+			// Add a broken count. Because the break is after the WAL commits, the
+			// count should still restore correctly on the next iteration where we
+			// call 'newCountdown'.
+			err = cd.addCountBroken()
 			if err != nil {
 				t.Fatal(err)
 			}
 			expectedCountdownLen++
-		}
-
-		// Add a broken count. Because the break is after the WAL commits, the
-		// count should still restore correctly on the next iteration where we
-		// call 'newCountdown'.
-		err = cd.addCountBroken()
-		if err != nil {
-			t.Fatal(err)
-		}
-		expectedCountdownLen++
-		err = cd.Close()
-		if err != nil {
-			t.Fatal(err)
+			err = cd.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 
@@ -498,31 +505,33 @@ func TestWALIntegration(t *testing.T) {
 	// 3 independent sets of these things, so they all have clear dependence
 	// within but no dependence next to. Then we'll update all of them and the
 	// count as well in parallel transactions.
-	cd, err := newCountdown(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wg sync.WaitGroup
-	for i := uint64(0); i < 50; i++ {
-		wg.Add(1)
-		go func(i uint64) {
-			defer wg.Done()
-			for j := uint64(1); j < 200; j++ {
-				err := cd.changeSplotch(i, j)
-				if err != nil {
-					t.Error(err)
+	if fastrand.Intn(3) != 0 {
+		cd, err := newCountdown(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		for i := uint64(0); i < 50; i++ {
+			wg.Add(1)
+			go func(i uint64) {
+				defer wg.Done()
+				for j := uint64(1); j < 200; j++ {
+					err := cd.changeSplotch(i, j)
+					if err != nil {
+						t.Error(err)
+					}
 				}
-			}
-		}(i)
-	}
-	wg.Wait()
-	err = cd.Close()
-	if err != nil {
-		t.Fatal(err)
+			}(i)
+		}
+		wg.Wait()
+		err = cd.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Open and close the cd to allow the consistency checks to run.
-	cd, err = newCountdown(dir)
+	cd, err := newCountdown(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
