@@ -7,12 +7,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"math"
 	"os"
 	"sort"
 	"sync"
 
 	"github.com/NebulousLabs/Sia/build"
+	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/Sia/persist"
 	"github.com/NebulousLabs/errors"
 )
@@ -40,11 +42,11 @@ type WAL struct {
 	// logFile contains all of the persistent data associated with the log.
 	logFile file
 
+	// path is the path to the underlying logFile
+	path string
+
 	// mu is used to lock the availablePages field of the wal
 	mu sync.Mutex
-
-	// log is used to log errors and warnings
-	log *persist.Logger
 
 	// syncCond is used to schedule the calls to fsync
 	syncCond *sync.Cond
@@ -62,6 +64,9 @@ type WAL struct {
 
 	// syncing indicates if the syncing thread is currently being executed
 	syncing bool
+
+	// recoveryComplete indicates if the caller signalled that the recovery is complete
+	recoveryComplete bool
 
 	// dependencies are used to inject special behaviour into the wal by providing
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
@@ -105,12 +110,12 @@ func (w *WAL) allocatePages(numPages uint64) {
 }
 
 // newWal initializes and returns a wal.
-func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update, w *WAL, err error) {
+func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	// Create a new WAL
 	newWal := WAL{
 		deps:     deps,
-		log:      logger,
 		stopChan: make(chan struct{}),
+		path:     path,
 	}
 
 	// Create a condition for the wal
@@ -118,10 +123,6 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 	// Try opening the WAL file.
 	data, err := deps.readFile(path)
 	if err == nil {
-		// err == nil indicates that there is a WAL file which can be recovered to determine
-		// if the shutdown was clean or not
-		newWal.log.Println("WARN: WAL file detected, performing recovery.")
-
 		// Recover WAL and return updates
 		updates, err := newWal.recover(data)
 		if err != nil {
@@ -130,9 +131,6 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 
 		// Reuse the existing wal
 		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
-
-		// Invalidate data in wal
-		newWal.logFile.Write(make([]byte, len(data)))
 
 		return updates, &newWal, err
 
@@ -152,6 +150,8 @@ func newWal(path string, logger *persist.Logger, deps dependencies) (u []Update,
 		return nil, nil, build.ExtendErr("Failed to write metadata to file", err)
 	}
 
+	// When we create a new wal we don't need the caller to signal recoveryComplete
+	newWal.recoveryComplete = true
 	return nil, &newWal, nil
 }
 
@@ -177,24 +177,15 @@ func readWALMetadata(data []byte) error {
 func (w *WAL) recover(data []byte) ([]Update, error) {
 	// Get all the first pages to sort them by txn number
 	var firstPages ByTxnNumber
-	var err error
-
-	// check if the data is long enough to contain the metadata
-	if len(data) < pageSize {
-		return nil, errors.New("existing WAL with incomplete metadata found")
-	}
 
 	// Validate metadata
-	if err := readWALMetadata(data[0:pageSize]); err != nil {
+	if err := readWALMetadata(data[0:]); err != nil {
 		return nil, err
 	}
 	// Starting at index 1 because the first page is reserved for metadata
 	for i := 1; int64(i)*pageSize < int64(len(data)); i++ {
 		// read the page data
 		offset := int64(i) * pageSize
-
-		// increase the number of available pages
-		w.availablePages = append(w.availablePages, uint64(offset))
 
 		// unmarshall the page
 		var p page
@@ -224,13 +215,43 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 	updates := []Update{}
 	for _, sp := range firstPages {
 		var txn Transaction
-		if err = unmarshalTransaction(&txn, sp.p, sp.nextPage, data); err == nil {
-			updates = append(updates, txn.Updates...)
+		err := unmarshalTransaction(&txn, sp.p, sp.nextPage, data)
+		if err != nil {
+			continue
 		}
+		updates = append(updates, txn.Updates...)
 	}
-	w.filePageCount = uint64(len(w.availablePages))
+
+	// If there were no updates we can savely set the recovery to complete
+	if len(updates) == 0 {
+		w.recoveryComplete = true
+	}
 
 	return updates, nil
+}
+
+// RecoveryComplete is called after a wal is recovered to signal that it is
+// save to reset the wal
+func (w *WAL) RecoveryComplete() error {
+	// Marshal the pageStatusApplied
+	pageAppliedBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(pageAppliedBytes, pageStatusApplied)
+
+	// Get the length of the file.
+	length, err := w.logFile.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+
+	// Set all pages to applied
+	for offset := int64(crypto.HashSize) + pageSize; offset < length; offset += pageSize {
+		if _, err := w.logFile.WriteAt(pageAppliedBytes, offset); err != nil {
+			return err
+		}
+	}
+
+	w.recoveryComplete = true
+	return nil
 }
 
 // managedReservePages reserves pages for a given payload. If it needs to
@@ -326,7 +347,6 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 
 	p := firstPage
 	npo := nextPageOffset
-	var nextPage page
 	var err error
 	var txnPayload []byte
 	// Unmarshal the pages in the order of the transaction
@@ -342,6 +362,7 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 		}
 
 		// Set the offset for the next page before npo is overwritten
+		var nextPage page
 		nextPage.offset = npo
 
 		// Unmarshal the page. The last page might not have pageSize bytes.
@@ -357,12 +378,6 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 		// Move on to the next page
 		p.nextPage = &nextPage
 		p = &nextPage
-	}
-
-	// Sanity check: firstPage must lead to lastPage
-	p = txn.firstPage
-	for p.nextPage != nil {
-		p = p.nextPage
 	}
 
 	// Verify the checksum before unmarshalling the updates. Otherwise we might
@@ -403,9 +418,9 @@ func writeWALMetadata(f file) error {
 }
 
 // Close closes the wal and frees used resources
-func (w *WAL) Close() {
+func (w *WAL) Close() error {
 	close(w.stopChan)
-	w.logFile.Close()
+	return w.logFile.Close()
 }
 
 // New will open a WAL. If the previous run did not shut down cleanly, a set of
@@ -418,7 +433,7 @@ func (w *WAL) Close() {
 // simulating multiple consecutive unclean shutdowns. If the updates are
 // properly idempotent, there should be no functional difference between the
 // multiple appearances and them just being loaded a single time correctly.
-func New(path string, logger *persist.Logger) (u []Update, w *WAL, err error) {
+func New(path string) (u []Update, w *WAL, err error) {
 	// Create a wal with production dependencies
-	return newWal(path, logger, prodDependencies{})
+	return newWal(path, prodDependencies{})
 }

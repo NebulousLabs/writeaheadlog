@@ -22,7 +22,7 @@ var (
 	// metadata defines the WAL v1.0.0 metadata
 	metadata = Metadata{
 		Header:  "WAL",
-		Version: "1.0",
+		Version: "1.0.0",
 	}
 )
 
