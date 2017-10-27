@@ -234,21 +234,18 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 // save to reset the wal
 func (w *WAL) RecoveryComplete() error {
 	// Marshal the pageStatusApplied
-	buffer := new(bytes.Buffer)
-	err := binary.Write(buffer, binary.LittleEndian, uint64(pageStatusApplied))
-	if err != nil {
-		return err
-	}
+	pageAppliedBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(pageAppliedBytes, pageStatusApplied)
 
-	// Get the length of the file
-	length, err := w.logFile.Seek(0, io.SeekStart)
+	// Get the length of the file.
+	length, err := w.logFile.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
 
 	// Set all pages to applied
 	for offset := int64(crypto.HashSize); offset < length; offset += pageSize {
-		if _, err := w.logFile.WriteAt(buffer.Bytes(), offset); err != nil {
+		if _, err := w.logFile.WriteAt(pageAppliedBytes, offset); err != nil {
 			return err
 		}
 	}

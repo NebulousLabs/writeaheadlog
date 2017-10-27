@@ -413,7 +413,7 @@ func TestWALIntegration(t *testing.T) {
 	// 'newCountdown' will chcek that the file is consistent, and detect that
 	// updates are being applied correctly.
 	expectedCountdownLen := 1
-	if fastrand.Intn(3) != 0 {
+	if fastrand.Intn(2) != 0 {
 		for i := 0; i < 300; i++ {
 			cd, err := newCountdown(dir)
 			if err != nil {
@@ -436,7 +436,7 @@ func TestWALIntegration(t *testing.T) {
 
 	// Continue increasing the count, but this time start performing multiple
 	// transactions between each opening and closing.
-	if fastrand.Intn(3) != 0 {
+	if fastrand.Intn(2) != 0 {
 		for i := 0; i < 10; i++ {
 			cd, err := newCountdown(dir)
 			if err != nil {
@@ -462,8 +462,8 @@ func TestWALIntegration(t *testing.T) {
 	// Test the durability of the WAL. We'll initialize to simulate a disk
 	// failure after the WAL commits, but before we are able to apply the
 	// commit.
-	if fastrand.Intn(3) != 0 {
-		for i := 0; i < 10; i++ {
+	if fastrand.Intn(2) != 0 {
+		for i := 0; i < 100; i++ {
 			cd, err := newCountdown(dir)
 			if err != nil {
 				t.Fatal(err)
@@ -496,6 +496,7 @@ func TestWALIntegration(t *testing.T) {
 		}
 	}
 
+
 	// Test the parallelism. Basic way to do that is to have a second file that
 	// we update in parallel transactions. But I'd also like to be  able to
 	// test parallel transactions that act on the same file? Not sure if that's
@@ -505,7 +506,7 @@ func TestWALIntegration(t *testing.T) {
 	// 3 independent sets of these things, so they all have clear dependence
 	// within but no dependence next to. Then we'll update all of them and the
 	// count as well in parallel transactions.
-	if fastrand.Intn(3) != 0 {
+	if fastrand.Intn(2) != 0 {
 		cd, err := newCountdown(dir)
 		if err != nil {
 			t.Fatal(err)
