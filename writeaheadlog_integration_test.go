@@ -2,9 +2,11 @@ package wal
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -54,13 +56,13 @@ type countdownArray struct {
 	// Different parts of this file can easily be edited in parallel
 	// transactions, while at the same time there are clear consistency
 	// requirements which require 
-	splotchFile *os.File
-	splothMutex sync.Mutex
+	splotchFile  *os.File
+	splotchMutex sync.Mutex
 }
 
-// addBrokenCount is a copy of addCount, but we never apply the updates, and we
+// addCountBroken is a copy of addCount, but we never apply the updates, and we
 // return an error.
-func (ca *countdownArray) addBrokenCount() error {
+func (ca *countdownArray) addCountBroken() error {
 	// Increment the count in memory, creating a list of updates as we go.
 	var updates []Update
 	for i := 0; i < len(ca.countdown); i++ {
@@ -217,6 +219,11 @@ func newCountdown(dir string) (*countdownArray, error) {
 		return nil, err
 	}
 
+	// Signal that the recovery is complete
+	if err := wal.RecoveryComplete(); err != nil {
+		return nil, err
+	}
+
 	// Create the countdownArray and apply any updates from the wal.
 	ca := &countdownArray{
 		file: file,
@@ -254,7 +261,7 @@ func newCountdown(dir string) (*countdownArray, error) {
 			break
 		}
 		if num != start-uint64(i) {
-			return nil, errors.New("count is incorrect representation")
+			return nil, fmt.Errorf("count is incorrect representation %v != (%v - %v)", num, start, uint64(i))
 		}
 	}
 	return ca, nil
@@ -323,7 +330,6 @@ func TestWALIntegration(t *testing.T) {
 	// Test the durability of the WAL. We'll initialize to simulate a disk
 	// failure after the WAL commits, but before we are able to apply the
 	// commit.
-	expectedCountdownLen := 1
 	for i := 0; i < 10; i++ {
 		cd, err := newCountdown(dir)
 		if err != nil {
@@ -345,7 +351,7 @@ func TestWALIntegration(t *testing.T) {
 		// Add a broken count. Because the break is after the WAL commits, the
 		// count should still restore correctly on the next iteration where we
 		// call 'newCountdown'.
-		err = cd.addBrokenCount()
+		err = cd.addCountBroken()
 		if err != nil {
 			t.Fatal(err)
 		}
