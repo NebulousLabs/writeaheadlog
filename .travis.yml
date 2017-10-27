@@ -10,3 +10,6 @@ install:
   - test -z "$(golint)"
 
 script: go vet && go test -v
+
+notifications:
+  email: false
