@@ -1,16 +1,14 @@
 package wal
 
-const (
-	// pageSize defines the size of a single page in the wal
-	pageSize = 4096
+import "github.com/NebulousLabs/Sia/crypto"
 
-	// maxPayloadSize defines the max size a payload can have to still fit in a single page
-	maxPayloadSize = pageSize - 64
+const (
+	pageSize       = 4096
+	pageMetaSize   = 64 // 32-byte checksum + 4 uint64s
+	maxPayloadSize = pageSize - pageMetaSize
 )
 
 const (
-	// The following enumeration defines the different possible pageStatus
-	// values
 	pageStatusInvalid = iota
 	pageStatusOther
 	pageStatusWritten
@@ -30,3 +28,5 @@ var (
 type Metadata struct {
 	Header, Version string
 }
+
+type checksum [crypto.HashSize]byte
