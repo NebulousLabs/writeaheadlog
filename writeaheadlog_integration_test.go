@@ -40,6 +40,22 @@ type countdownArray struct {
 	countdown []uint64
 	file      *os.File
 	wal       *WAL
+
+	// splotchFile is an extension to the countdown file, where large pages of
+	// the file are all required to have the same value in each 8 byte field.
+	// It does not matter what the value actually is, so long as the value is
+	// the same.
+	//
+	// The first 80 bytes must be 10 8-byte values that are all identical.
+	// The next 160 bytes must be 20 8-byte values that are all identical.
+	// The next 240 bytes must be 30 8-byte values that are all identical.
+	// ...
+	//
+	// Different parts of this file can easily be edited in parallel
+	// transactions, while at the same time there are clear consistency
+	// requirements which require 
+	splotchFile *os.File
+	splothMutex sync.Mutex
 }
 
 // addBrokenCount is a copy of addCount, but we never apply the updates, and we
@@ -233,11 +249,12 @@ func newCountdown(dir string) (*countdownArray, error) {
 		return nil, errors.New("count is incorrect length")
 	}
 	for i, num := range ca.countdown {
-		if num != start-uint64(i) {
-			return nil, errors.New("count is incorrect representation")
-		}
 		if num == 0 {
 			ca.countdown = ca.countdown[:i+1]
+			break
+		}
+		if num != start-uint64(i) {
+			return nil, errors.New("count is incorrect representation")
 		}
 	}
 	return ca, nil
@@ -306,6 +323,7 @@ func TestWALIntegration(t *testing.T) {
 	// Test the durability of the WAL. We'll initialize to simulate a disk
 	// failure after the WAL commits, but before we are able to apply the
 	// commit.
+	expectedCountdownLen := 1
 	for i := 0; i < 10; i++ {
 		cd, err := newCountdown(dir)
 		if err != nil {
@@ -338,7 +356,15 @@ func TestWALIntegration(t *testing.T) {
 		}
 	}
 
-	// Test the parallelism
+	// Test the parallelism. Basic way to do that is to have a second file that
+	// we update in parallel transactions. But I'd also like to be  able to
+	// test parallel transactions that act on the same file? Not sure if that's
+	// strictly necessary. But we could have a second file that perhaps tracks
+	// two unrelated fields, like 5 integer arrays that are all intialized with
+	// the same integers, over 10kb or something. And then that file could have
+	// 3 independent sets of these things, so they all have clear dependence
+	// within but no dependence next to. Then we'll update all of them and the
+	// count as well in parallel transactions.
 }
 
 // TODO: Do the count increasing thing but with one page updates.
