@@ -60,8 +60,8 @@ func (csu changeSplotchUpdate) marshal() []byte {
 
 // unmarshalChangeSplotchUpdate will unpack a set of updates.
 func unmarshalChangeSplotchUpdate(updateBytes []byte) changeSplotchUpdate {
-	return changeSplotchUpdate {
-		index:    binary.LittleEndian.Uint64(updateBytes[:8]),
+	return changeSplotchUpdate{
+		index:       binary.LittleEndian.Uint64(updateBytes[:8]),
 		splotchData: updateBytes[8:],
 	}
 }
@@ -90,9 +90,9 @@ type countdownArray struct {
 	//
 	// '0' is used as a special starting value to indicate that the whole
 	// splotch should be empty.
-	splotchFile  *os.File
+	splotchFile *os.File
 
-	wal       *WAL
+	wal *WAL
 }
 
 // addCount will increment every counter in the array, and then append a '1',
@@ -243,7 +243,7 @@ func (ca *countdownArray) changeSplotch(splotchIndex, newVal uint64) error {
 		Name:    changeSplotchName,
 		Version: "1.0.0",
 		Instructions: changeSplotchUpdate{
-			index:    uint64(splotchIndex),
+			index:       uint64(splotchIndex),
 			splotchData: newSplotch,
 		}.marshal(),
 	}
@@ -275,7 +275,7 @@ func (ca *countdownArray) changeSplotch(splotchIndex, newVal uint64) error {
 // changeSplotchApply applies a change splotch update to the countdown array.
 func (ca *countdownArray) changeSplotchApply(update Update) error {
 	csu := unmarshalChangeSplotchUpdate(update.Instructions)
-	offset := int64(csu.index * (csu.index+1) / 2) * 8 * 10
+	offset := int64(csu.index*(csu.index+1)/2) * 8 * 10
 	_, err := ca.splotchFile.WriteAt(csu.splotchData, offset)
 	return err
 }
@@ -326,9 +326,9 @@ func newCountdown(dir string) (*countdownArray, error) {
 
 	// Create the countdownArray and apply any updates from the wal.
 	ca := &countdownArray{
-		file: file,
+		file:        file,
 		splotchFile: splotchFile,
-		wal:  wal,
+		wal:         wal,
 	}
 	err = ca.applyUpdates(updates)
 	if err != nil {
@@ -372,14 +372,14 @@ func newCountdown(dir string) (*countdownArray, error) {
 		return nil, err
 	}
 	skip := 0
-	for i := 0; i < len(splotchData); i+= skip {
+	for i := 0; i < len(splotchData); i += skip {
 		skip += 80
-		current := binary.LittleEndian.Uint64(splotchData[i:i+8])
+		current := binary.LittleEndian.Uint64(splotchData[i : i+8])
 		if current == 0 {
 			continue
 		}
 		for j := 8; j < skip; j += 8 {
-			next := binary.LittleEndian.Uint64(splotchData[j+i:j+i+8])
+			next := binary.LittleEndian.Uint64(splotchData[j+i : j+i+8])
 			if next != current-1 {
 				return nil, fmt.Errorf("splotch does not count down correctly: %v != (%v - %v)", current, next, 1)
 			}
@@ -494,7 +494,6 @@ func TestWALIntegration(t *testing.T) {
 			}
 		}
 	}
-
 
 	// Test the parallelism. Basic way to do that is to have a second file that
 	// we update in parallel transactions. But I'd also like to be  able to
