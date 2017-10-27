@@ -244,7 +244,7 @@ func (w *WAL) RecoveryComplete() error {
 	}
 
 	// Set all pages to applied
-	for offset := int64(crypto.HashSize); offset < length; offset += pageSize {
+	for offset := int64(crypto.HashSize) + pageSize; offset < length; offset += pageSize {
 		if _, err := w.logFile.WriteAt(pageAppliedBytes, offset); err != nil {
 			return err
 		}
