@@ -13,13 +13,21 @@ import (
 	"github.com/NebulousLabs/errors"
 )
 
+const (
+	// addCountName is the name of the addCount update.
+	addCountName = "addCountUpdate - with an intentionally extra long name to force updates in the WAL to be a lot larger than they would be otherwise."
+
+	// changeSplotchName is the name of the changeSplotch update.
+	changeSplotchName = "changeSplotchName"
+)
+
 // addCountUpdate is a single instruction to increase a count on disk.
 type addCountUpdate struct {
 	index    uint64
 	newCount uint64
 }
 
-// marshal will pack an update into a byte slice.
+// marshal will pack an add count update into a byte slice.
 func (acu addCountUpdate) marshal() []byte {
 	ret := make([]byte, 16)
 	binary.LittleEndian.PutUint64(ret[:8], acu.index)
@@ -27,37 +35,130 @@ func (acu addCountUpdate) marshal() []byte {
 	return ret
 }
 
-// unmarshalUpdates will unpack a set of updates.
-func unmarshalUpdate(updateBytes []byte) addCountUpdate {
+// unmarshalAddCountUpdate will unpack an add count update.
+func unmarshalAddCountUpdate(updateBytes []byte) addCountUpdate {
 	return addCountUpdate{
 		index:    binary.LittleEndian.Uint64(updateBytes[:8]),
 		newCount: binary.LittleEndian.Uint64(updateBytes[8:]),
 	}
 }
 
+// changeSplotchUpdate is a single instruction to replace the data in a splotch
+// of the splotchFile.
+type changeSplotchUpdate struct {
+	index       uint64
+	splotchData []byte
+}
+
+// marshal will pack a change splotch update into a byte slice.
+func (csu changeSplotchUpdate) marshal() []byte {
+	prefix := make([]byte, 8)
+	binary.LittleEndian.PutUint64(prefix, csu.index)
+	return append(prefix, csu.splotchData...)
+}
+
+// unmarshalChangeSplotchUpdate will unpack a set of updates.
+func unmarshalChangeSplotchUpdate(updateBytes []byte) changeSplotchUpdate {
+	return changeSplotchUpdate {
+		index:    binary.LittleEndian.Uint64(updateBytes[:8]),
+		splotchData: updateBytes[8:],
+	}
+}
+
 // countingArray is a sample object that we wish to persist to disk using the
 // wal.
 type countdownArray struct {
-	// Should always be {2, 1, 0}, or {3, 2, 1, 0}... etc.
+	// Should always be {2, 1, 0}, or {3, 2, 1, 0}... etc. The file contains an
+	// array on disk that should have the exact same property.
 	countdown []uint64
 	file      *os.File
-	wal       *WAL
 
 	// splotchFile is an extension to the countdown file, where large pages of
-	// the file are all required to have the same value in each 8 byte field.
-	// It does not matter what the value actually is, so long as the value is
-	// the same.
+	// the file are all required to have a continuous countdown. The count can
+	// start at any value, and then it will count down for the whole page,
+	// underflowing if required.
 	//
-	// The first 80 bytes must be 10 8-byte values that are all identical.
-	// The next 160 bytes must be 20 8-byte values that are all identical.
-	// The next 240 bytes must be 30 8-byte values that are all identical.
+	// The first 80 bytes must be 10 8-byte values that count down and underflow.
+	// The next 160 bytes must be 20 8-byte values that count down and underflow.
+	// The next 240 bytes must be 30 8-byte values that count down and underflow.
 	// ...
 	//
 	// Different parts of this file can easily be edited in parallel
 	// transactions, while at the same time there are clear consistency
-	// requirements which require 
+	// requirements.
+	//
+	// '0' is used as a special starting value to indicate that the whole
+	// splotch should be empty.
 	splotchFile  *os.File
-	splotchMutex sync.Mutex
+
+	wal       *WAL
+}
+
+// addCount will increment every counter in the array, and then append a '1',
+// but using the wal to maintain consistency on disk.
+func (ca *countdownArray) addCount() error {
+	// Increment the count in memory, creating a list of updates as we go.
+	var updates []Update
+	for i := 0; i < len(ca.countdown); i++ {
+		ca.countdown[i]++
+		updates = append(updates, Update{
+			Name:    addCountName,
+			Version: "1.0.0",
+			Instructions: addCountUpdate{
+				index:    uint64(i),
+				newCount: ca.countdown[i],
+			}.marshal(),
+		})
+	}
+
+	// Corner case - if there are no updates, because this is the first time we
+	// add to the count, just write out the file piece.
+	if len(updates) == 0 {
+		writeBytes := make([]byte, 8)
+		_, err := ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)))
+		if err != nil {
+			return err
+		}
+		err = ca.file.Sync()
+		if err != nil {
+			return err
+		}
+		ca.countdown = append(ca.countdown, 0)
+		return nil
+	}
+
+	// Create the WAL transaction.
+	tx, err := ca.wal.NewTransaction(updates)
+	if err != nil {
+		return err
+	}
+	// Perform the setup write on the file.
+	writeBytes := make([]byte, 8)
+	_, err = ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)))
+	if err != nil {
+		return err
+	}
+	err = ca.file.Sync()
+	if err != nil {
+		return err
+	}
+	// Signal completed setup and then wait for the commitment to finish.
+	errChan := tx.SignalSetupComplete()
+	err = <-errChan
+	if err != nil {
+		return err
+	}
+	// Apply the updates.
+	ca.countdown = append(ca.countdown, 0)
+	err = ca.applyUpdates(updates)
+	if err != nil {
+		return err
+	}
+	err = tx.SignalUpdatesApplied()
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // addCountBroken is a copy of addCount, but we never apply the updates, and we
@@ -117,55 +218,42 @@ func (ca *countdownArray) addCountBroken() error {
 	return nil
 }
 
-// addCount will increment every counter in the array, and then append a '1',
-// but using the wal to maintain consistency on disk.
-func (ca *countdownArray) addCount() error {
-	// Increment the count in memory, creating a list of updates as we go.
-	var updates []Update
-	for i := 0; i < len(ca.countdown); i++ {
-		ca.countdown[i]++
-		updates = append(updates, Update{
-			Name:    "addCountUpdate - with an intentionally extra long name to force updates in the WAL to be a lot larger than they would be otherwise.",
-			Version: "1.0.0",
-			Instructions: addCountUpdate{
-				index:    uint64(i),
-				newCount: ca.countdown[i],
-			}.marshal(),
-		})
-	}
+// addCountApply applies an add count update to the countdown array.
+func (ca *countdownArray) addCountApply(update Update) error {
+	acu := unmarshalAddCountUpdate(update.Instructions)
+	writeBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(writeBytes, acu.newCount)
+	_, err := ca.file.WriteAt(writeBytes, 8*int64(acu.index))
+	return err
+}
 
-	// Corner case - if there are no updates, because this is the first time we
-	// add to the count, just write out the file piece.
-	if len(updates) == 0 {
-		writeBytes := make([]byte, 8)
-		_, err := ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)))
-		if err != nil {
-			return err
+// changeSplotch will change the targeted splotch file on disk to count down
+// form the provided value.
+func (ca *countdownArray) changeSplotch(splotchIndex, newVal uint64) error {
+	// The splotch update is intentionally encoded as the full write to
+	// simulate what a full write would be from a real application.
+	newSplotch := make([]byte, 10*8*(splotchIndex+1))
+	if newVal != 0 {
+		for i := uint64(0); i < (splotchIndex+1)*10; i++ {
+			binary.LittleEndian.PutUint64(newSplotch[8*i:(8*i)+8], newVal-i)
 		}
-		err = ca.file.Sync()
-		if err != nil {
-			return err
-		}
-		ca.countdown = append(ca.countdown, 0)
-		return nil
+	}
+	update := Update{
+		Name:    changeSplotchName,
+		Version: "1.0.0",
+		Instructions: changeSplotchUpdate{
+			index:    uint64(splotchIndex),
+			splotchData: newSplotch,
+		}.marshal(),
 	}
 
 	// Create the WAL transaction.
-	tx, err := ca.wal.NewTransaction(updates)
-	if err != nil {
-		return err
-	}
-	// Perform the setup write on the file.
-	writeBytes := make([]byte, 8)
-	_, err = ca.file.WriteAt(writeBytes, 8*int64(len(ca.countdown)))
-	if err != nil {
-		return err
-	}
-	err = ca.file.Sync()
+	tx, err := ca.wal.NewTransaction([]Update{update})
 	if err != nil {
 		return err
 	}
 	// Signal completed setup and then wait for the commitment to finish.
+	// (there was no setup, but we still have to signal it)
 	errChan := tx.SignalSetupComplete()
 	err = <-errChan
 	if err != nil {
@@ -173,7 +261,7 @@ func (ca *countdownArray) addCount() error {
 	}
 	// Apply the updates.
 	ca.countdown = append(ca.countdown, 0)
-	err = ca.applyUpdates(updates)
+	err = ca.applyUpdates([]Update{update})
 	if err != nil {
 		return err
 	}
@@ -184,15 +272,27 @@ func (ca *countdownArray) addCount() error {
 	return nil
 }
 
+// changeSplotchApply applies a change splotch update to the countdown array.
+func (ca *countdownArray) changeSplotchApply(update Update) error {
+	csu := unmarshalChangeSplotchUpdate(update.Instructions)
+	offset := int64(csu.index * (csu.index+1) / 2) * 8 * 10
+	_, err := ca.splotchFile.WriteAt(csu.splotchData, offset)
+	return err
+}
+
 // applyUpdates will apply a bunch of wal updates to the ca persist file.
 func (ca *countdownArray) applyUpdates(updates []Update) error {
 	for _, update := range updates {
-		acu := unmarshalUpdate(update.Instructions)
-		writeBytes := make([]byte, 8)
-		binary.LittleEndian.PutUint64(writeBytes, acu.newCount)
-		_, err := ca.file.WriteAt(writeBytes, 8*int64(acu.index))
-		if err != nil {
-			return err
+		if update.Name == addCountName {
+			err := ca.addCountApply(update)
+			if err != nil {
+				return nil
+			}
+		} else if update.Name == changeSplotchName {
+			err := ca.changeSplotchApply(update)
+			if err != nil {
+				return nil
+			}
 		}
 	}
 	return nil
@@ -211,6 +311,11 @@ func newCountdown(dir string) (*countdownArray, error) {
 	if err != nil {
 		return nil, err
 	}
+	splotchFilename := filepath.Join(dir, "splotch.dat")
+	splotchFile, err := os.OpenFile(splotchFilename, os.O_RDWR|os.O_CREATE, 0700)
+	if err != nil {
+		return nil, err
+	}
 
 	// Open the WAL.
 	walFilename := filepath.Join(dir, "wal.dat")
@@ -219,14 +324,10 @@ func newCountdown(dir string) (*countdownArray, error) {
 		return nil, err
 	}
 
-	// Signal that the recovery is complete
-	if err := wal.RecoveryComplete(); err != nil {
-		return nil, err
-	}
-
 	// Create the countdownArray and apply any updates from the wal.
 	ca := &countdownArray{
 		file: file,
+		splotchFile: splotchFile,
 		wal:  wal,
 	}
 	err = ca.applyUpdates(updates)
@@ -263,6 +364,32 @@ func newCountdown(dir string) (*countdownArray, error) {
 		if num != start-uint64(i) {
 			return nil, fmt.Errorf("count is incorrect representation %v != (%v - %v)", num, start, uint64(i))
 		}
+	}
+
+	// Check that the splotch file follows the splotch rules.
+	splotchData, err := ioutil.ReadAll(ca.splotchFile)
+	if err != nil {
+		return nil, err
+	}
+	skip := 0
+	for i := 0; i < len(splotchData); i+= skip {
+		skip += 80
+		current := binary.LittleEndian.Uint64(splotchData[i:i+8])
+		if current == 0 {
+			continue
+		}
+		for j := 8; j < skip; j += 8 {
+			next := binary.LittleEndian.Uint64(splotchData[j+i:j+i+8])
+			if next != current-1 {
+				return nil, fmt.Errorf("splotch does not count down correctly: %v != (%v - %v)", current, next, 1)
+			}
+			current = next
+		}
+	}
+
+	// Signal that the recovery is complete
+	if err := wal.RecoveryComplete(); err != nil {
+		return nil, err
 	}
 	return ca, nil
 }
@@ -371,10 +498,36 @@ func TestWALIntegration(t *testing.T) {
 	// 3 independent sets of these things, so they all have clear dependence
 	// within but no dependence next to. Then we'll update all of them and the
 	// count as well in parallel transactions.
+	cd, err := newCountdown(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := uint64(0); i < 50; i++ {
+		wg.Add(1)
+		go func(i uint64) {
+			defer wg.Done()
+			for j := uint64(1); j < 200; j++ {
+				err := cd.changeSplotch(i, j)
+				if err != nil {
+					t.Error(err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	err = cd.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Open and close the cd to allow the consistency checks to run.
+	cd, err = newCountdown(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cd.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 }
-
-// TODO: Do the count increasing thing but with one page updates.
-
-// TODO: Do the broken count thing, but with one page updates.
-
-// TODO: Do the parallelsim thing but with one page updates.
