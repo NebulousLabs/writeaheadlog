@@ -261,7 +261,6 @@ func (ca *countdownArray) changeSplotch(splotchIndex, newVal uint64) error {
 		return err
 	}
 	// Apply the updates.
-	ca.countdown = append(ca.countdown, 0)
 	err = ca.applyUpdates([]Update{update})
 	if err != nil {
 		return err
