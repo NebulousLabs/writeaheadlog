@@ -9,7 +9,7 @@ install:
   - test -z "$(go fmt)"
   - test -z "$(golint)"
 
-script: go vet && go test -v
+script: go vet && go test -race -v
 
 notifications:
   email: false
