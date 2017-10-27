@@ -71,6 +71,11 @@ func newWALTester(name string, deps dependencies) (*walTester, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if err := wal.RecoveryComplete(); err != nil {
+		return nil, err
+	}
+
 	cmt := &walTester{
 		wal:     wal,
 		updates: updates,
@@ -315,7 +320,7 @@ func TestPayloadCorrupted(t *testing.T) {
 
 	if len(updates2) != 1 {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
-			0, len(updates2))
+			1, len(updates2))
 	}
 }
 
@@ -389,7 +394,7 @@ func TestPayloadCorrupted2(t *testing.T) {
 func TestWalParallel(t *testing.T) {
 	wt, err := newWALTester(t.Name(), prodDependencies{})
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	// Prepare a random update

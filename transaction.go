@@ -260,6 +260,7 @@ func (t Transaction) validateChecksum() error {
 	if t.firstPage == nil {
 		return errors.New("Couldn't verify checksum. firstPage is nil")
 	}
+
 	checksum, err := t.checksum()
 	if err != nil {
 		return errors.New("Failed to create checksum for validation")
@@ -273,7 +274,7 @@ func (t Transaction) validateChecksum() error {
 // SignalUpdatesApplied  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
 func (t *Transaction) SignalUpdatesApplied() error {
 	if !t.setupComplete || !t.commitComplete || t.releaseComplete {
-		panic("misuse of transaction - call each of the signaling methods exactly once, in serial, in order")
+		return errors.New("misuse of transaction - call each of the signaling methods exactly once, in serial, in order")
 	}
 	t.releaseComplete = true
 
@@ -311,19 +312,24 @@ func (t *Transaction) SignalUpdatesApplied() error {
 // completed, and that the WAL can safely commit to the transaction being
 // applied atomically.
 func (t *Transaction) SignalSetupComplete() <-chan error {
+	done := make(chan error, 1)
+
 	if t.setupComplete || t.commitComplete || t.releaseComplete {
-		panic("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")
+		done <- errors.New("misuse of transaction - call each of the signaling methods exactly ones, in serial, in order")
+		return done
 	}
 	t.setupComplete = true
 
 	// Commit the transaction non-blocking
-	done := make(chan error)
 	go t.commit(done)
 	return done
 }
 
 // NewTransaction creates a transaction from a set of updates
 func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
+	if !w.recoveryComplete {
+		return nil, errors.New("can't call NewTransaction before recovery is complete")
+	}
 	// Check that there are updates for the transaction to process.
 	if len(updates) == 0 {
 		return nil, errors.New("cannot create a transaction without updates")
@@ -353,6 +359,5 @@ func (t *Transaction) writeToFile() error {
 		}
 		page = page.nextPage
 	}
-
 	return nil
 }

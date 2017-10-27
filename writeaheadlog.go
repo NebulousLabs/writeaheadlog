@@ -7,12 +7,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"math"
 	"os"
 	"sort"
 	"sync"
 
 	"github.com/NebulousLabs/Sia/build"
+	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/Sia/persist"
 	"github.com/NebulousLabs/errors"
 )
@@ -40,6 +42,9 @@ type WAL struct {
 	// logFile contains all of the persistent data associated with the log.
 	logFile file
 
+	// path is the path to the underlying logFile
+	path string
+
 	// mu is used to lock the availablePages field of the wal
 	mu sync.Mutex
 
@@ -59,6 +64,9 @@ type WAL struct {
 
 	// syncing indicates if the syncing thread is currently being executed
 	syncing bool
+
+	// recoveryComplete indicates if the caller signalled that the recovery is complete
+	recoveryComplete bool
 
 	// dependencies are used to inject special behaviour into the wal by providing
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
@@ -107,6 +115,7 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	newWal := WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),
+		path:     path,
 	}
 
 	// Create a condition for the wal
@@ -141,6 +150,8 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 		return nil, nil, build.ExtendErr("Failed to write metadata to file", err)
 	}
 
+	// When we create a new wal we don't need the caller to signal recoveryComplete
+	newWal.recoveryComplete = true
 	return nil, &newWal, nil
 }
 
@@ -167,22 +178,14 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 	// Get all the first pages to sort them by txn number
 	var firstPages ByTxnNumber
 
-	// check if the data is long enough to contain the metadata
-	if len(data) < pageSize {
-		return nil, errors.New("existing WAL with incomplete metadata found")
-	}
-
 	// Validate metadata
-	if err := readWALMetadata(data[0:pageSize]); err != nil {
+	if err := readWALMetadata(data[0:]); err != nil {
 		return nil, err
 	}
 	// Starting at index 1 because the first page is reserved for metadata
 	for i := 1; int64(i)*pageSize < int64(len(data)); i++ {
 		// read the page data
 		offset := int64(i) * pageSize
-
-		// increase the number of available pages
-		w.availablePages = append(w.availablePages, uint64(offset))
 
 		// unmarshall the page
 		var p page
@@ -214,14 +217,44 @@ func (w *WAL) recover(data []byte) ([]Update, error) {
 		var txn Transaction
 		err := unmarshalTransaction(&txn, sp.p, sp.nextPage, data)
 		if err != nil {
-			println(err.Error())
 			continue
 		}
 		updates = append(updates, txn.Updates...)
 	}
-	w.filePageCount = uint64(len(w.availablePages))
+
+	// If there were no updates we can savely set the recovery to complete
+	if len(updates) == 0 {
+		w.recoveryComplete = true
+	}
 
 	return updates, nil
+}
+
+// RecoveryComplete is called after a wal is recovered to signal that it is
+// save to reset the wal
+func (w *WAL) RecoveryComplete() error {
+	// Marshal the pageStatusApplied
+	buffer := new(bytes.Buffer)
+	err := binary.Write(buffer, binary.LittleEndian, uint64(pageStatusApplied))
+	if err != nil {
+		return err
+	}
+
+	// Get the length of the file
+	length, err := w.logFile.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
+
+	// Set all pages to applied
+	for offset := int64(crypto.HashSize); offset < length; offset += pageSize {
+		if _, err := w.logFile.WriteAt(buffer.Bytes(), offset); err != nil {
+			return err
+		}
+	}
+
+	w.recoveryComplete = true
+	return nil
 }
 
 // managedReservePages reserves pages for a given payload. If it needs to
@@ -317,7 +350,6 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 
 	p := firstPage
 	npo := nextPageOffset
-	var nextPage page
 	var err error
 	var txnPayload []byte
 	// Unmarshal the pages in the order of the transaction
@@ -333,6 +365,7 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 		}
 
 		// Set the offset for the next page before npo is overwritten
+		var nextPage page
 		nextPage.offset = npo
 
 		// Unmarshal the page. The last page might not have pageSize bytes.
@@ -348,12 +381,6 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 		// Move on to the next page
 		p.nextPage = &nextPage
 		p = &nextPage
-	}
-
-	// Sanity check: firstPage must lead to lastPage
-	p = txn.firstPage
-	for p.nextPage != nil {
-		p = p.nextPage
 	}
 
 	// Verify the checksum before unmarshalling the updates. Otherwise we might
