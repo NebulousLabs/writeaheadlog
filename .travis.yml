@@ -1,0 +1,12 @@
+language: go
+
+go:
+  - 1.9
+
+install:
+  - go get -t github.com/NebulousLabs/wal
+  - go get -u github.com/golang/lint/golint
+  - test -z "$(go fmt)"
+  - test -z "$(golint)"
+
+script: go vet && go test -v
