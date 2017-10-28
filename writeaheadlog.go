@@ -124,7 +124,7 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	data, err := deps.readFile(path)
 	if err == nil {
 		// Recover WAL and return updates
-		updates, err := newWal.recover(data)
+		updates, err := newWal.recoverWal(data)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -174,7 +174,7 @@ func readWALMetadata(data []byte) error {
 }
 
 // recover recovers a WAL and returns comitted but not finished updates
-func (w *WAL) recover(data []byte) ([]Update, error) {
+func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 	// Get all the first pages to sort them by txn number
 	var firstPages ByTxnNumber
 
@@ -243,12 +243,14 @@ func (w *WAL) RecoveryComplete() error {
 		return err
 	}
 
-	// Set all pages to applied
+	// Set all pages to applied.
 	for offset := int64(crypto.HashSize) + pageSize; offset < length; offset += pageSize {
 		if _, err := w.logFile.WriteAt(pageAppliedBytes, offset); err != nil {
 			return err
 		}
 	}
+	// Sync to lock down the obliteration.
+	w.logFile.Sync()
 
 	w.recoveryComplete = true
 	return nil
