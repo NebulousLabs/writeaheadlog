@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
 )
 
@@ -93,12 +92,4 @@ func (p *page) appendTo(buf []byte) []byte {
 	copy(buf[n+32:], p.payload)
 
 	return buf
-}
-
-// WriteToFile writes the page to disk
-func (p page) writeToFile(f file) error {
-	if _, err := f.WriteAt(p.appendTo(nil), int64(p.offset)); err != nil {
-		return build.ExtendErr("Writing the page to disk failed", err)
-	}
-	return nil
 }

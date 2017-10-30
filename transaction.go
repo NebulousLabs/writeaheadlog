@@ -129,9 +129,7 @@ func (t *Transaction) commit(done chan error) {
 		done <- errors.New("Write failed on purpose")
 		return
 	}
-
-	err = t.firstPage.writeToFile(t.wal.logFile)
-	if err != nil {
+	if _, err := t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset)); err != nil {
 		done <- build.ExtendErr("Writing the first page failed", err)
 		return
 	}
@@ -269,7 +267,7 @@ func (t *Transaction) SignalUpdatesApplied() error {
 		// Disk failure causes the commit to fail
 		err = errors.New("Write failed on purpose")
 	} else {
-		err = t.firstPage.writeToFile(t.wal.logFile)
+		_, err = t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset))
 	}
 	if err != nil {
 		return build.ExtendErr("Couldn't write the page to file", err)
