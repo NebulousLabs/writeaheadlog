@@ -508,8 +508,8 @@ func TestWALIntegration(t *testing.T) {
 	}
 
 	// Test the parallelism. Basic way to do that is to have a second file that
-	// we update in parallel transactions. But I'd also like to be  able to
-	// test parallel transactions that act on the same file? Not sure if that's
+	// we update in parallel transactions. But I'd also like to be able to test
+	// parallel transactions that act on the same file? Not sure if that's
 	// strictly necessary. But we could have a second file that perhaps tracks
 	// two unrelated fields, like 5 integer arrays that are all intialized with
 	// the same integers, over 10kb or something. And then that file could have
