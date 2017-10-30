@@ -14,7 +14,6 @@ import (
 	"sync"
 
 	"github.com/NebulousLabs/Sia/build"
-	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/errors"
 )
 
@@ -241,7 +240,7 @@ func (w *WAL) RecoveryComplete() error {
 	}
 
 	// Set all pages to applied.
-	for offset := int64(crypto.HashSize) + pageSize; offset < length; offset += pageSize {
+	for offset := int64(pageSize + checksumSize); offset < length; offset += pageSize {
 		if _, err := w.logFile.WriteAt(pageAppliedBytes, offset); err != nil {
 			return err
 		}

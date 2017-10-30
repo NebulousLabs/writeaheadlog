@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 
 	"github.com/NebulousLabs/Sia/build"
-	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/errors"
+	"golang.org/x/crypto/blake2b"
 )
 
 // Update defines a single update that can be sent to the WAL and saved
@@ -91,7 +91,7 @@ type Transaction struct {
 // checksum calculates the checksum of a transaction excluding the checksum
 // field of each page
 func (t Transaction) checksum() (c checksum) {
-	h := crypto.NewHash()
+	h, _ := blake2b.New256(nil)
 	for page := t.firstPage; page != nil; page = page.nextPage {
 		// no error possible when writing to h
 		page.writeToNoChecksum(h)

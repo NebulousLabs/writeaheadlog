@@ -1,11 +1,11 @@
 package wal
 
-import "github.com/NebulousLabs/Sia/crypto"
-
 const (
 	pageSize       = 4096
 	pageMetaSize   = 64 // 32-byte checksum + 4 uint64s
 	maxPayloadSize = pageSize - pageMetaSize
+
+	checksumSize = 32
 )
 
 const (
@@ -26,4 +26,5 @@ type metadata struct {
 	Header, Version string
 }
 
-type checksum [crypto.HashSize]byte
+// A checksum is a 256-bit blake2b hash.
+type checksum [checksumSize]byte
