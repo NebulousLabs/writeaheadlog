@@ -92,9 +92,10 @@ type Transaction struct {
 // field of each page
 func (t Transaction) checksum() (c checksum) {
 	h, _ := blake2b.New256(nil)
+	buf := make([]byte, pageSize)
 	for page := t.firstPage; page != nil; page = page.nextPage {
-		// no error possible when writing to h
-		page.writeToNoChecksum(h)
+		b := page.appendTo(buf[:0])
+		h.Write(b[checksumSize:]) // exclude checksum
 	}
 	h.Sum(c[:0])
 	return
@@ -329,9 +330,11 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 
 // writeToFile writes all the pages of the transaction to disk
 func (t *Transaction) writeToFile() error {
+	buf := make([]byte, pageSize)
 	for page := t.firstPage; page != nil; page = page.nextPage {
-		if err := page.writeToFile(t.wal.logFile); err != nil {
-			return err
+		b := page.appendTo(buf[:0])
+		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
+			return build.ExtendErr("Writing the page to disk failed", err)
 		}
 	}
 	return nil

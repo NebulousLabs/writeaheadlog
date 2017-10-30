@@ -195,7 +195,7 @@ func TestReleaseFailed(t *testing.T) {
 
 	if len(updates2) != 1 {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
-			0, len(updates2))
+			1, len(updates2))
 	}
 }
 

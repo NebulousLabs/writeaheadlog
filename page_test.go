@@ -2,7 +2,6 @@ package wal
 
 import (
 	"bytes"
-	"io/ioutil"
 	"testing"
 
 	"github.com/NebulousLabs/fastrand"
@@ -23,13 +22,10 @@ func TestPageMarshalling(t *testing.T) {
 	}
 
 	// Marshal and unmarshal data
-	buf := new(bytes.Buffer)
-	if err := currentPage.writeTo(buf); err != nil {
-		t.Fatalf("Failed to marshal the page %v", err)
-	}
+	b := currentPage.appendTo(nil)
 
 	var pageRestored page
-	unmarshalPage(&pageRestored, buf.Bytes())
+	unmarshalPage(&pageRestored, b)
 
 	// Check if the fields are the same
 	if pageRestored.transactionNumber != currentPage.transactionNumber {
@@ -50,8 +46,8 @@ func TestPageMarshalling(t *testing.T) {
 	}
 }
 
-// BenchmarkPageWriteTo benchmarks the writeTo method of page.
-func BenchmarkPageWriteTo(b *testing.B) {
+// BenchmarkPageAppendTo benchmarks the appendTo method of page.
+func BenchmarkPageAppendTo(b *testing.B) {
 	p := page{
 		offset:            4096,
 		transactionNumber: 42,
@@ -62,12 +58,11 @@ func BenchmarkPageWriteTo(b *testing.B) {
 		},
 	}
 	fastrand.Read(p.transactionChecksum[:])
+	buf := make([]byte, pageSize)
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		if err := p.writeTo(ioutil.Discard); err != nil {
-			b.Fatalf("Failed to marshal the page %v", err)
-		}
+		p.appendTo(buf[:0])
 	}
 }
