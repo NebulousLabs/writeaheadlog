@@ -397,6 +397,9 @@ func newCountdown(dir string) (*countdownArray, error) {
 // TestWALIntegration creates a plausable use case for the WAL and then
 // attempts to utilize all functions of the WAL.
 func TestWALIntegration(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
 	// Create a folder to house everything we are working with.
 	dir := build.TempDir("wal", t.Name())
 	err := os.MkdirAll(dir, 0700)
