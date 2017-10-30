@@ -228,7 +228,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 }
 
 // RecoveryComplete is called after a wal is recovered to signal that it is
-// save to reset the wal
+// safe to reset the wal
 func (w *WAL) RecoveryComplete() error {
 	// Marshal the pageStatusApplied
 	pageAppliedBytes := make([]byte, 8)
