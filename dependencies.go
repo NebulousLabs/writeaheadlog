@@ -23,7 +23,6 @@ type (
 		ReadAt([]byte, int64) (int, error)
 		Sync() error
 		WriteAt([]byte, int64) (int, error)
-		Seek(int64, int) (int64, error)
 		Stat() (os.FileInfo, error)
 	}
 )
