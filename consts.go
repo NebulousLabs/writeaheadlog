@@ -17,14 +17,14 @@ const (
 )
 
 const (
+	recoveryStateUnclean = iota
+	recoveryStateSwipe
+)
+
+const (
 	metadataHeader  = "WAL"
 	metadataVersion = "1.0"
 )
-
-// metadata contains the header and version of the WAL.
-type metadata struct {
-	Header, Version string
-}
 
 // A checksum is a 256-bit blake2b hash.
 type checksum [checksumSize]byte
