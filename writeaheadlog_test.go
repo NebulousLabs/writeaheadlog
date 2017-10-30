@@ -84,7 +84,7 @@ func newWALTester(name string, deps dependencies) (*walTester, error) {
 	return cmt, nil
 }
 
-// getTransactionPages is
+// transactionPages returns all of the pages associated with a transaction.
 func transactionPages(txn *Transaction) (pages []page) {
 	page := txn.firstPage
 	for page != nil {
