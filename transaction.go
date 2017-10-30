@@ -97,7 +97,7 @@ func (t Transaction) checksum() (c checksum) {
 		b := page.appendTo(buf[:0])
 		h.Write(b[checksumSize:]) // exclude checksum
 	}
-	h.Sum(c[:0])
+	copy(c[:], h.Sum(buf[:0]))
 	return
 }
 
