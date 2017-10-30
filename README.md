@@ -15,20 +15,20 @@ recover the WAL and return all the updates of transactions that were not
 completed.
 
 ```
-// Open the WAL.                                                                                 
-updates, wal, err := New(walPath)                                                            
-if err != nil {                                                                                  
-    return err                                                                              
+// Open the WAL.
+updates, wal, err := New(walPath)
+if err != nil {
+    return err
 }
 
 if len(updates) != 0 {
-    // Apparently the system crashed.
-    // Handle the unfinished updates accordingly
+	// Apparently the system crashed. Handle the unfinished updates
+	// accordingly.
     applyUpdates(updates)
-    
-    // After the recovery is complete we need to
-    // signal the WAL that we are done. Otherwise
-    // future calls to WAL are going to panic.
+
+	// After the recovery is complete we need to signal the WAL that we are
+	// done. All calls to 'NewTransaction' will return an error until
+	// RecoveryComplete() has been called.
     if err := wal.RecoveryComplete(); err != nil {
         return err
     }
@@ -39,11 +39,11 @@ The wal can then be used to create a `Transaction` like this using a set of
 updates:
 
 ```
-// Create the WAL transaction.                                                                   
-tx, err := ca.wal.NewTransaction(updates)                                                        
-if err != nil {                                                                                  
-    return err                                                                                   
-}   
+// Create the WAL transaction.
+tx, err := ca.wal.NewTransaction(updates)
+if err != nil {
+    return err
+}
 ```
 
 An `Update` consists of a Name, Version and Instructions. One transaction can
@@ -52,13 +52,13 @@ want to do some kind of setup. Once completed the next step is to signal the
 WAL that the setup is complete.
 
 ```
-// Signal completed setup and then wait for the commitment to finish.
-// This will cause the WAL to call fsync on it's underlying file.
-errChan := tx.SignalSetupComplete()                                                              
-err = <-errChan                                                                                  
-if err != nil {                                                                                  
-    return err                                                                                   
-} 
+// Signal completed setup and then wait for the commitment to finish. This
+// will cause the WAL to call fsync on it's underlying file.
+errChan := tx.SignalSetupComplete()
+err = <-errChan
+if err != nil {
+    return err
+}
 ```
 
 This will write the updates to disk and commit them. The caller needs to wait
@@ -72,8 +72,8 @@ transaction.
 // allows it to recycle used pages. The caller might run this in a goroutine
 // but if the system crashes again before the call finishes the caller might
 // receive the already applied instructions when recovering the WAL.
-err = tx.SignalUpdatesApplied()                                                                  
-if err != nil {                                                                                  
-    return err                                                                                   
+err = tx.SignalUpdatesApplied()
+if err != nil {
+    return err
 }
 ```
