@@ -77,19 +77,21 @@ func (p *page) appendTo(buf []byte) []byte {
 		nextPagePosition = math.MaxUint64
 	}
 
-	// ensure buf is large enough to hold p
-	if cap(buf) < p.size() {
-		buf = make([]byte, 0, p.size())
+	// if buf has enough capacity to hold p, use it; otherwise allocate
+	var b []byte
+	if rest := buf[len(buf):]; cap(rest) >= p.size() {
+		b = rest[:p.size()]
+	} else {
+		b = make([]byte, p.size())
 	}
-	buf = buf[:p.size()]
 
 	// write page contents
-	n := copy(buf[:], p.transactionChecksum[:])
-	binary.LittleEndian.PutUint64(buf[n:], p.pageStatus)
-	binary.LittleEndian.PutUint64(buf[n+8:], p.transactionNumber)
-	binary.LittleEndian.PutUint64(buf[n+16:], nextPagePosition)
-	binary.LittleEndian.PutUint64(buf[n+24:], uint64(len(p.payload)))
-	copy(buf[n+32:], p.payload)
+	n := copy(b, p.transactionChecksum[:])
+	binary.LittleEndian.PutUint64(b[n:], p.pageStatus)
+	binary.LittleEndian.PutUint64(b[n+8:], p.transactionNumber)
+	binary.LittleEndian.PutUint64(b[n+16:], nextPagePosition)
+	binary.LittleEndian.PutUint64(b[n+24:], uint64(len(p.payload)))
+	copy(b[n+32:], p.payload)
 
-	return buf
+	return append(buf, b...)
 }
