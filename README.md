@@ -1,7 +1,7 @@
 # A general purpose, high performance write-ahead-log
 
 A write-ahead-log (WAL) ensures durability and atomicity for updating data on
-disk if used correctly.  Instructions are marshalled and passed to the WAL
+disk if used correctly. Instructions are marshalled and passed to the WAL
 before they are applied to disk. The WAL makes sure that the instructions are
 synced to the WAL file before the user applies them. That way the wal can
 notify the user about unfinished updates due to a sudden power outage. It is up
@@ -18,20 +18,20 @@ completed.
 // Open the WAL.
 updates, wal, err := New(walPath)
 if err != nil {
-    return err
+	return err
 }
 
 if len(updates) != 0 {
 	// Apparently the system crashed. Handle the unfinished updates
 	// accordingly.
-    applyUpdates(updates)
+	applyUpdates(updates)
 
 	// After the recovery is complete we need to signal the WAL that we are
 	// done. All calls to 'NewTransaction' will return an error until
 	// RecoveryComplete() has been called.
-    if err := wal.RecoveryComplete(); err != nil {
-        return err
-    }
+	if err := wal.RecoveryComplete(); err != nil {
+		return err
+	}
 }
 ```
 
@@ -42,12 +42,12 @@ updates:
 // Create the WAL transaction.
 tx, err := ca.wal.NewTransaction(updates)
 if err != nil {
-    return err
+	return err
 }
 ```
 
 An `Update` consists of a Name, Version and Instructions. One transaction can
-hold multiple updates.  After the `Transaction` is created the caller might
+hold multiple updates. After the `Transaction` is created the caller might
 want to do some kind of setup. Once completed the next step is to signal the
 WAL that the setup is complete.
 
@@ -57,7 +57,7 @@ WAL that the setup is complete.
 errChan := tx.SignalSetupComplete()
 err = <-errChan
 if err != nil {
-    return err
+	return err
 }
 ```
 
@@ -74,6 +74,6 @@ transaction.
 // receive the already applied instructions when recovering the WAL.
 err = tx.SignalUpdatesApplied()
 if err != nil {
-    return err
+	return err
 }
 ```
