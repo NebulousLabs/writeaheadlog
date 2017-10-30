@@ -11,5 +11,9 @@ install:
 
 script: go vet && go test -race -v
 
+branches:
+  only:
+    - master
+
 notifications:
   email: false

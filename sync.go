@@ -4,8 +4,8 @@ import (
 	"github.com/NebulousLabs/Sia/build"
 )
 
-// threadedWALSync syncs the wal in regular intervalls
-func threadedWALSync(w *WAL) {
+// threadedSync syncs the WAL in regular intervals
+func (w *WAL) threadedSync() {
 	for {
 		// Holding the lock of the condition is not required before calling
 		// Signal or Broadcast, but we also want to check the syncCount to
@@ -43,7 +43,7 @@ func (w *WAL) fSync() {
 	// If there is currently no instance of the syncing thread create one
 	if !w.syncing {
 		w.syncing = true
-		go threadedWALSync(w)
+		go w.threadedSync()
 	}
 
 	// Signal the syncing thread that we require syncing the wal

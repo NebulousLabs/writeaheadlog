@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 
 	"github.com/NebulousLabs/Sia/build"
-	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/errors"
 )
 
@@ -15,13 +15,13 @@ import (
 // an update.
 type page struct {
 	// offset is the offset in the file that this page has.
-	offset uint64 // Is NOT marshalled to disk.
+	offset uint64 // NOT marshalled to disk.
 
 	// transactionChecksum is the hash of all the pages and data in the
 	// committed transaction, including page status, nextPage, the payloads,
 	// and the transaction number. The checksum is only used internal to the
 	// WAL.
-	transactionChecksum [crypto.HashSize]byte
+	transactionChecksum checksum
 
 	// pageStatus should never be set to '0' since this is the default value
 	// and would indicate an incorrectly initialized page
@@ -40,32 +40,36 @@ type page struct {
 	// pageStatus is set to '4' if the transaction has been committed and
 	// applied, meaning that the transaction can be ignored upon load, and the
 	// associated pages can be reclaimed.
-	pageStatus uint64 // Gets marshalled to disk.
+	pageStatus uint64 // marshalled to disk.
 
 	// nextPage points to the logical next page in the logFile for this
 	// transaction. The page may not appear in the file in-order. This value
 	// is set to math.MaxUint64 if there is no next page (indicating this
 	// page is the last). The first page may be the only page, in which
 	// case it is also the last page.
-	nextPage *page // Gets marshalled as nextPage.offset.
+	nextPage *page // marshalled as nextPage.offset.
 
 	// transactionNumber is only saved for the last page, which can be
 	// determined by nextPage being nil, or when marshalled to disk if
 	// it is marshalled to math.MaxUint64
-	transactionNumber uint64 // Gets marshalled to disk.
+	transactionNumber uint64 // marshalled to disk.
 
 	// payload contains the marshalled update, which may be spread over multiple
 	// pages if it is large. If spread over multiple pages, the full payload
 	// can be assembled by appending the separate payloads together. To keep the
 	// full size of the page at under pageSize bytes, the payload should not
 	// be greater than (pageSize - 64 bytes).
-	payload []byte // Gets marshalled to disk.
+	payload []byte // marshalled to disk.
 }
 
-// Marshal marshals a page.
-func (p page) Marshal() ([]byte, error) {
+func (p page) size() int { return pageMetaSize + len(p.payload) }
+
+func (p *page) writeToNoChecksum(w io.Writer) error {
+	// sanity checks
 	if p.pageStatus == pageStatusInvalid {
 		panic(errors.New("Sanity check failed. Page was marshalled with invalid PageStatus"))
+	} else if p.size() > pageSize {
+		panic(fmt.Sprintf("sanity check failed: page is %d bytes too large", p.size()-pageSize))
 	}
 
 	var nextPagePosition uint64
@@ -75,42 +79,38 @@ func (p page) Marshal() ([]byte, error) {
 		nextPagePosition = math.MaxUint64
 	}
 
-	buffer := new(bytes.Buffer)
-
-	// write checksum, pageStatus, transactionNumber and nextPage
-	_, err1 := buffer.Write(p.transactionChecksum[:])
-	err2 := binary.Write(buffer, binary.LittleEndian, p.pageStatus)
-
-	err3 := binary.Write(buffer, binary.LittleEndian, p.transactionNumber)
-	err4 := binary.Write(buffer, binary.LittleEndian, nextPagePosition)
-
-	// write payloadSize and payload
-	err5 := binary.Write(buffer, binary.LittleEndian, uint64(len(p.payload)))
-	_, err6 := buffer.Write(p.payload)
-
-	// check for errors
-	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
-		return nil, errors.Compose(errors.New("Failed to marshal wal page"), err1, err2, err3, err4, err5, err6)
+	// write pageStatus, transactionNumber, nextPage, and payload size
+	buf := make([]byte, 8+8+8+8)
+	binary.LittleEndian.PutUint64(buf[0:8], p.pageStatus)
+	binary.LittleEndian.PutUint64(buf[8:16], p.transactionNumber)
+	binary.LittleEndian.PutUint64(buf[16:24], nextPagePosition)
+	binary.LittleEndian.PutUint64(buf[24:32], uint64(len(p.payload)))
+	if _, err := w.Write(buf); err != nil {
+		return err
 	}
 
-	// sanity check: page should be smaller or equal to pageSize
-	if buffer.Len() > pageSize {
-		panic(fmt.Errorf("sanity check failed: marshalled page is %d bytes too large",
-			pageSize-buffer.Len()))
+	// write payload
+	if _, err := w.Write(p.payload); err != nil {
+		return err
 	}
 
-	return buffer.Bytes(), nil
+	return nil
+}
+
+func (p *page) writeTo(w io.Writer) error {
+	// write checksum
+	if _, err := w.Write(p.transactionChecksum[:]); err != nil {
+		return err
+	}
+	// write the rest
+	return p.writeToNoChecksum(w)
 }
 
 // WriteToFile writes the page to disk
 func (p page) writeToFile(f file) error {
-	data, err := p.Marshal()
-	if err != nil {
-		return build.ExtendErr("Marshalling the page failed", err)
-	}
-	// Write the page to the file
-	_, err = f.WriteAt(data, int64(p.offset))
-	if err != nil {
+	buf := new(bytes.Buffer)
+	p.writeTo(buf)
+	if _, err := f.WriteAt(buf.Bytes(), int64(p.offset)); err != nil {
 		return build.ExtendErr("Writing the page to disk failed", err)
 	}
 

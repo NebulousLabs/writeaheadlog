@@ -90,21 +90,14 @@ type Transaction struct {
 
 // checksum calculates the checksum of a transaction excluding the checksum
 // field of each page
-func (t Transaction) checksum() ([crypto.HashSize]byte, error) {
-	page := t.firstPage
-
-	// Marshall all the pages and calculate the checksum
-	var data []byte
-	for page != nil {
-		bytes, err := page.Marshal()
-		if err != nil {
-			return [crypto.HashSize]byte{}, build.ExtendErr("Failed to marshall page", err)
-		}
-		// Ignore the transactionChecksum field (first 32 bytes)
-		data = append(data, bytes[crypto.HashSize:]...)
-		page = page.nextPage
+func (t Transaction) checksum() (c checksum) {
+	h := crypto.NewHash()
+	for page := t.firstPage; page != nil; page = page.nextPage {
+		// no error possible when writing to h
+		page.writeToNoChecksum(h)
 	}
-	return crypto.HashBytes(data), nil
+	h.Sum(c[:0])
+	return
 }
 
 // commit commits a transaction by setting the correct status and checksum
@@ -125,13 +118,8 @@ func (t *Transaction) commit(done chan error) {
 	// Set the transaction number of the first page and increase the transactionCounter of the wal
 	t.firstPage.transactionNumber = atomic.AddUint64(&t.wal.atomicNextTxnNum, 1) - 1
 
-	// calculate the checksum and write it to the first page
-	checksum, err := t.checksum()
-	if err != nil {
-		done <- build.ExtendErr("Unable to create checksum of transaction", err)
-		return
-	}
-	t.firstPage.transactionChecksum = checksum
+	// calculate the checksum
+	t.firstPage.transactionChecksum = t.checksum()
 
 	// Finalize the commit by writing the first page with the updated status if
 	// there have been no errors so far.
@@ -256,16 +244,9 @@ func initTransaction(t *Transaction) {
 // validateChecksum checks if a transaction has been corrupted by computing a hash
 // and comparing it to the one in the firstPage of the transaction
 func (t Transaction) validateChecksum() error {
-	// Check if firstPage is set
 	if t.firstPage == nil {
-		return errors.New("Couldn't verify checksum. firstPage is nil")
-	}
-
-	checksum, err := t.checksum()
-	if err != nil {
-		return errors.New("Failed to create checksum for validation")
-	}
-	if checksum != t.firstPage.transactionChecksum {
+		return errors.New("firstPage is nil")
+	} else if t.checksum() != t.firstPage.transactionChecksum {
 		return errors.New("checksum not valid")
 	}
 	return nil
@@ -289,19 +270,16 @@ func (t *Transaction) SignalUpdatesApplied() error {
 	} else {
 		err = t.firstPage.writeToFile(t.wal.logFile)
 	}
-
 	if err != nil {
 		return build.ExtendErr("Couldn't write the page to file", err)
 	}
-
 	t.wal.fSync()
-	// Update the wallets available pages
-	page := t.firstPage
+
+	// Update the wal's available pages
 	t.wal.mu.Lock()
-	for page != nil {
+	for page := t.firstPage; page != nil; page = page.nextPage {
 		// Append the index of the freed page
 		t.wal.availablePages = append(t.wal.availablePages, page.offset)
-		page = page.nextPage
 	}
 	t.wal.mu.Unlock()
 
@@ -351,13 +329,10 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 
 // writeToFile writes all the pages of the transaction to disk
 func (t *Transaction) writeToFile() error {
-	page := t.firstPage
-	for page != nil {
-		err := page.writeToFile(t.wal.logFile)
-		if err != nil {
+	for page := t.firstPage; page != nil; page = page.nextPage {
+		if err := page.writeToFile(t.wal.logFile); err != nil {
 			return err
 		}
-		page = page.nextPage
 	}
 	return nil
 }
