@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"io"
 	"math"
 	"os"
 	"sort"
@@ -235,10 +234,11 @@ func (w *WAL) RecoveryComplete() error {
 	binary.LittleEndian.PutUint64(pageAppliedBytes, pageStatusApplied)
 
 	// Get the length of the file.
-	length, err := w.logFile.Seek(0, io.SeekEnd)
+	stat, err := w.logFile.Stat()
 	if err != nil {
 		return err
 	}
+	length := stat.Size()
 
 	// Set all pages to applied.
 	for offset := int64(crypto.HashSize) + pageSize; offset < length; offset += pageSize {

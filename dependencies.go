@@ -24,6 +24,7 @@ type (
 		Sync() error
 		WriteAt([]byte, int64) (int, error)
 		Seek(int64, int) (int64, error)
+		Stat() (os.FileInfo, error)
 	}
 )
 
@@ -42,12 +43,4 @@ func (prodDependencies) openFile(path string, flag int, perm os.FileMode) (file,
 
 func (prodDependencies) create(path string) (file, error) {
 	return os.Create(path)
-}
-
-type prodFile struct {
-	*os.File
-}
-
-func (f *prodFile) Seek(offset int64, whence int) (int64, error) {
-	return f.Seek(offset, whence)
 }
