@@ -189,7 +189,9 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 		var err error
 		p.offset = uint64(offset)
 
-		// Check if the
+		// unmarshal the page from data. If the remaining data is less than the
+		// page size, unmarshal the rest of the data from offset:. Otherwise,
+		// unmarshal the data from offset:offset+pageSize.
 		if offset+pageSize > int64(len(data)) {
 			nextPage, err = unmarshalPage(&p, data[offset:])
 		} else {
