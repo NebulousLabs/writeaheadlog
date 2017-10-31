@@ -122,12 +122,12 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	if err == nil {
 		// Reuse the existing wal
 		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
-
-		// Recover WAL and return updates
-		updates, err := newWal.recoverWal(data)
 		if err != nil {
 			return nil, nil, err
 		}
+
+		// Recover WAL and return updates
+		updates, err := newWal.recoverWal(data)
 
 		return updates, &newWal, err
 
