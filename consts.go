@@ -18,7 +18,7 @@ const (
 
 const (
 	recoveryStateUnclean = iota
-	recoveryStateSwipe
+	recoveryStateWipe
 )
 
 const (

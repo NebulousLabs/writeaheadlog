@@ -6,7 +6,6 @@ package wal
 import (
 	"bytes"
 	"encoding/binary"
-	"io"
 	"math"
 	"os"
 	"sort"
@@ -199,7 +198,7 @@ func readWALMetadata(data []byte) (uint16, error) {
 	}
 
 	// Check the fields
-	if recoveryState != recoveryStateUnclean && recoveryState != recoveryStateSwipe {
+	if recoveryState != recoveryStateUnclean && recoveryState != recoveryStateWipe {
 		return 0, errors.New("recoveryState didn't match")
 	}
 	if string(headerData) != metadataHeader {
@@ -218,14 +217,13 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 	var firstPages ByTxnNumber
 
 	// Validate metadata
-	var recoveryState uint16
-	var err error
-	if recoveryState, err = readWALMetadata(data[0:]); err != nil {
+	recoveryState, err := readWALMetadata(data[0:])
+	if err != nil {
 		return nil, err
 	}
 
 	// If recoveryState is set to wipe we don't need to recover
-	if recoveryState == recoveryStateSwipe {
+	if recoveryState == recoveryStateWipe {
 		if err := w.wipeWAL(); err != nil {
 			return nil, err
 		}
@@ -286,7 +284,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 // writeRecoveryState is a helper function that changes the recoveryState on disk
 func (w *WAL) writeRecoveryState(state uint16) error {
 	// Set the metadata to unclean again
-	var recoveryState []byte
+	recoveryState := make([]byte, 2)
 	binary.LittleEndian.PutUint16(recoveryState, recoveryStateUnclean)
 	if _, err := w.logFile.WriteAt(recoveryState, 0); err != nil {
 		return err
@@ -297,18 +295,28 @@ func (w *WAL) writeRecoveryState(state uint16) error {
 // RecoveryComplete is called after a wal is recovered to signal that it is
 // safe to reset the wal
 func (w *WAL) RecoveryComplete() error {
-	// Set the metadata to swipe
-	if err := w.writeRecoveryState(recoveryStateSwipe); err != nil {
+	// Set the metadata to wipe
+	if err := w.writeRecoveryState(recoveryStateWipe); err != nil {
 		return err
 	}
 
-	// Sync before we start wiping
+	// Sync before we start swiping
 	if err := w.logFile.Sync(); err != nil {
 		return err
 	}
 
+	// Simulate crash after recovery state was written
+	if w.deps.disrupt("RecoveryFail") {
+		return nil
+	}
+
 	// Wipe the wal
 	if err := w.wipeWAL(); err != nil {
+		return err
+	}
+
+	// Sync after swiping
+	if err := w.logFile.Sync(); err != nil {
 		return err
 	}
 
@@ -476,10 +484,11 @@ func (w *WAL) wipeWAL() error {
 	binary.LittleEndian.PutUint64(pageAppliedBytes, pageStatusApplied)
 
 	// Get the length of the file.
-	length, err := w.logFile.Seek(0, io.SeekEnd)
+	stat, err := w.logFile.Stat()
 	if err != nil {
 		return err
 	}
+	length := stat.Size()
 
 	// Set all pages to applied.
 	for offset := int64(pageSize + checksumSize); offset < length; offset += pageSize {
@@ -495,42 +504,36 @@ func writeWALMetadata(f file) error {
 	buffer := new(bytes.Buffer)
 
 	// Prepare the data that is written to the buffer
-	swipe := uint16(recoveryStateUnclean)
+	recoveryState := uint16(recoveryStateUnclean)
 	headerData := []byte(metadataHeader)
 	headerLength := uint16(len(headerData))
 	versionData := []byte(metadataVersion)
 	versionlength := uint16(len(versionData))
 
-	// Write swipe state
-	if err := binary.Write(buffer, binary.LittleEndian, &swipe); err != nil {
+	// Write wipe state
+	if err := binary.Write(buffer, binary.LittleEndian, &recoveryState); err != nil {
 		return build.ExtendErr("could not marshal recovery state", err)
 	}
-
 	// Write header length
 	if err := binary.Write(buffer, binary.LittleEndian, &headerLength); err != nil {
 		return build.ExtendErr("could not marshal header length", err)
 	}
-
 	// Write header
 	if _, err := buffer.Write(headerData); err != nil {
 		return build.ExtendErr("could not write header", err)
 	}
-
 	// Write version length
 	if err := binary.Write(buffer, binary.LittleEndian, &versionlength); err != nil {
 		return build.ExtendErr("could not marshal version length", err)
 	}
-
 	// Write version
 	if _, err := buffer.Write(versionData); err != nil {
 		return build.ExtendErr("could not write version data", err)
 	}
-
 	// Sanity check. Metadata must not be greater than pageSize
 	if buffer.Len() > pageSize {
 		panic("WAL metadata is greater than pageSize")
 	}
-
 	// Write marshalled data to disk
 	_, err := f.WriteAt(buffer.Bytes(), 0)
 	if err != nil {

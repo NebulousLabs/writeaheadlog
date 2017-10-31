@@ -41,6 +41,19 @@ func (dependencyReleaseFail) disrupt(s string) bool {
 	return false
 }
 
+// dependencyRecoveryFail causes the RecoveryComplete function to fail after
+// the metadata was changed to wipe
+type dependencyRecoveryFail struct {
+	prodDependencies
+}
+
+func (dependencyRecoveryFail) disrupt(s string) bool {
+	if s == "RecoveryFail" {
+		return true
+	}
+	return false
+}
+
 // walTester holds a WAL along with some other fields
 // useful for testing, and has methods implemented on it that can assist
 // testing.
@@ -646,6 +659,69 @@ func TestRestoreTransactions(t *testing.T) {
 	}
 	if bytes.Compare(originalData, recoveredData) != 0 {
 		t.Errorf("The recovered data doesn't match the original data")
+	}
+}
+
+// TestRecoveryFailed checks if the WAL behave correctly if a crash occurs
+// during a call to RecoveryComplete
+func TestRecoveryFailed(t *testing.T) {
+	wt, err := newWALTester(t.Name(), dependencyRecoveryFail{})
+	if err != nil {
+		t.Error(err)
+	}
+
+	// Prepare random updates
+	numUpdates := 10
+	updates := []Update{}
+	for i := 0; i < numUpdates; i++ {
+		updates = append(updates, Update{
+			Name:         "test",
+			Version:      "1.0",
+			Instructions: fastrand.Bytes(10000),
+		})
+	}
+
+	// Create txn
+	txn, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		return
+	}
+
+	// Wait for the txn to be committed
+	if err = <-txn.SignalSetupComplete(); err != nil {
+		return
+	}
+
+	// Close and restart the wal.
+	wt.Close()
+	updates2, w, err := New(wt.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// New should return 1 update
+	if len(updates2) != numUpdates {
+		t.Errorf("There should be %v update but there were %v", numUpdates, len(updates2))
+	}
+
+	// Signal that the recovery is complete
+	if err := w.RecoveryComplete(); err != nil {
+		t.Errorf("Failed to signal completed recovery: %v", err)
+	}
+
+	// Restart the wal again
+	if err := w.Close(); err != nil {
+		t.Errorf("Failed to close wal: %v", err)
+	}
+	updates3, w, err := New(wt.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	// There should be 0 updates this time
+	if len(updates3) != 0 {
+		t.Errorf("There should be %v updates but there were %v", 0, len(updates3))
 	}
 }
 
