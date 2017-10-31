@@ -87,9 +87,9 @@ type walTester struct {
 }
 
 // Close is a helper function for a clean tester shutdown
-func (wt *walTester) Close() {
+func (wt *walTester) Close() error {
 	// Close wal
-	wt.wal.Close()
+	return wt.wal.Close()
 }
 
 // newWalTester returns a ready-to-rock walTester.
@@ -715,7 +715,10 @@ func TestRecoveryFailed(t *testing.T) {
 	}
 
 	// Close and restart the wal.
-	wt.Close()
+	if err := wt.Close(); err == nil {
+		t.Error("There should have been an error but there wasn't")
+	}
+
 	updates2, w, err := newWal(wt.path, dependencyRecoveryFail{})
 	if err != nil {
 		t.Fatal(err)
@@ -739,7 +742,6 @@ func TestRecoveryFailed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer w.Close()
 
 	// There should be 0 updates this time
 	if len(updates3) != 0 {

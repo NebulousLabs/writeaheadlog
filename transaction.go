@@ -283,6 +283,9 @@ func (t *Transaction) SignalUpdatesApplied() error {
 	}
 	t.wal.mu.Unlock()
 
+	// Decrease the number of active transactions
+	atomic.AddInt64(&t.wal.atomicUnfinishedTxns, -1)
+
 	return nil
 }
 
@@ -323,6 +326,9 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	// Initialize the transaction by splitting up the payload among free pages
 	// and writing them to disk.
 	go initTransaction(&newTransaction)
+
+	// Increase the number of active transaction
+	atomic.AddInt64(&w.atomicUnfinishedTxns, 1)
 
 	return &newTransaction, nil
 }

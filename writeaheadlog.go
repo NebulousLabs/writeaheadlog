@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
@@ -68,6 +69,10 @@ type WAL struct {
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
 	deps dependencies
+
+	// atomicUnfinishedTxns counts how many transactions were created but not
+	// released yet. This counter needs to be 0 for the wal to exit cleanly.
+	atomicUnfinishedTxns int64
 }
 
 type (
@@ -543,24 +548,26 @@ func writeWALMetadata(f file) error {
 	return nil
 }
 
-// Close closes the wal and frees used resources
+// Close closes the wal, frees used resources and checks for active
+// transactions.
 func (w *WAL) Close() error {
-	if !w.deps.disrupt("UncleanShutdown") {
-		// Set the recovery state to indicate clean shutdown
-		err := w.writeRecoveryState(recoveryStateClean)
-		if err != nil {
-			return err
-		}
+	// Check if there are unfinished transactions
+	var err1 error
+	var err2 error
+	var err3 error
 
-		// Make sure the recovery state is written to disk
-		err = w.logFile.Sync()
-		if err != nil {
-			return err
-		}
+	if atomic.LoadInt64(&w.atomicUnfinishedTxns) != 0 {
+		err1 = errors.New("There are still non-released transactions left")
 	}
 
+	if err1 == nil && !w.deps.disrupt("UncleanShutdown") {
+		// Set the recovery state to indicate clean shutdown
+		err2 = w.writeRecoveryState(recoveryStateClean)
+	}
+
+	err3 = w.logFile.Close()
 	close(w.stopChan)
-	return w.logFile.Close()
+	return errors.Compose(err1, err2, err3)
 }
 
 // New will open a WAL. If the previous run did not shut down cleanly, a set of
