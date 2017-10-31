@@ -1,9 +1,12 @@
 package wal
 
 import (
+	"errors"
 	"io"
 	"io/ioutil"
 	"os"
+
+	"github.com/NebulousLabs/fastrand"
 )
 
 // These interfaces define the wal's dependencies. Using the smallest
@@ -27,6 +30,32 @@ type (
 	}
 )
 
+// dependencyCommitFail corrupts the first page of a transaction when it
+// is committed
+type dependencyCommitFail struct {
+	prodDependencies
+}
+
+func (dependencyCommitFail) disrupt(s string) bool {
+	if s == "CommitFail" {
+		return true
+	}
+	return false
+}
+
+// dependencyReleaseFail corrupts the first page of a transaction when it
+// is released
+type dependencyReleaseFail struct {
+	prodDependencies
+}
+
+func (dependencyReleaseFail) disrupt(s string) bool {
+	if s == "ReleaseFail" {
+		return true
+	}
+	return false
+}
+
 // prodDependencies is a passthrough to the standard library calls
 type prodDependencies struct{}
 
@@ -42,4 +71,78 @@ func (prodDependencies) openFile(path string, flag int, perm os.FileMode) (file,
 
 func (prodDependencies) create(path string) (file, error) {
 	return os.Create(path)
+}
+
+type prodFile struct {
+	*os.File
+}
+
+func (f *prodFile) Seek(offset int64, whence int) (int64, error) {
+	return f.Seek(offset, whence)
+}
+
+// faultyFile implements a file that simulates a faulty disk.
+type faultyFile struct {
+	file   *os.File
+	failed bool
+}
+
+func (f *faultyFile) Read(p []byte) (int, error) {
+	return f.file.Read(p)
+}
+func (f *faultyFile) Write(p []byte) (int, error) {
+	fail := fastrand.Intn(2) == 0
+	if fail {
+		f.failed = true
+		return len(p), nil
+	}
+	return f.file.Write(p)
+}
+func (f *faultyFile) Close() error { return f.file.Close() }
+func (f *faultyFile) Name() string {
+	return f.file.Name()
+}
+func (f *faultyFile) ReadAt(p []byte, off int64) (int, error) {
+	return f.file.ReadAt(p, off)
+}
+func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
+	fail := fastrand.Intn(2) == 0
+	if fail {
+		f.failed = true
+		return len(p), nil
+	}
+	return f.file.WriteAt(p, off)
+}
+func (f *faultyFile) Stat() (os.FileInfo, error) {
+	return f.file.Stat()
+}
+func (f *faultyFile) Sync() error {
+	if f.failed {
+		return errors.New("could not write to disk (faultyDisk)")
+	}
+	return f.file.Sync()
+}
+
+// faultyDiskDependency implements dependencies that simulate a faulty disk.
+type faultyDiskDependency struct{}
+
+func (faultyDiskDependency) disrupt(s string) bool {
+	return false
+}
+func (faultyDiskDependency) readFile(path string) ([]byte, error) {
+	return ioutil.ReadFile(path)
+}
+func (faultyDiskDependency) openFile(path string, flag int, perm os.FileMode) (file, error) {
+	f, err := os.OpenFile(path, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return &faultyFile{f, false}, nil
+}
+func (faultyDiskDependency) create(path string) (file, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	return &faultyFile{f, false}, nil
 }

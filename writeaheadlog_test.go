@@ -28,38 +28,6 @@ func (dependencyUncleanShutdown) disrupt(s string) bool {
 	return false
 }
 
-// dependencyCommitFail corrupts the first page of a transaction when it
-// is committed
-type dependencyCommitFail struct {
-	prodDependencies
-}
-
-func (dependencyCommitFail) disrupt(s string) bool {
-	if s == "CommitFail" {
-		return true
-	}
-	if s == "UncleanShutdown" {
-		return true
-	}
-	return false
-}
-
-// dependencyReleaseFail corrupts the first page of a transaction when it
-// is released
-type dependencyReleaseFail struct {
-	prodDependencies
-}
-
-func (dependencyReleaseFail) disrupt(s string) bool {
-	if s == "ReleaseFail" {
-		return true
-	}
-	if s == "UncleanShutdown" {
-		return true
-	}
-	return false
-}
-
 // dependencyRecoveryFail causes the RecoveryComplete function to fail after
 // the metadata was changed to wipe
 type dependencyRecoveryFail struct {
@@ -176,6 +144,67 @@ func TestCommitFailed(t *testing.T) {
 	if len(updates2) != 0 {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
 			0, len(updates2))
+	}
+}
+
+// TestWALInconsistentSync verifies that the WAL handles the case where the
+// file randomly fails writes. When the file failes a write, it returns an
+// error on sync.
+func TestWALInconsistentSync(t *testing.T) {
+	var wt *walTester
+	err := build.Retry(50, time.Millisecond*100, func() error {
+		tester, err := newWALTester(t.Name(), faultyDiskDependency{})
+		if err != nil {
+			return err
+		}
+		wt = tester
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wt.Close()
+
+	// this test generates a lot of build.Criticals. Suppress stderr so it
+	// doesn't create a lot of useless test output.
+	os.Stderr = nil
+
+	// for 20 seconds, create large transactions and commit them to the wal, then
+	// reopen the WAL. The WAL should stay consistent.
+	for start := time.Now(); time.Since(start) < time.Second*10; time.Sleep(time.Millisecond * 100) {
+		err := func() error {
+			updates := []Update{}
+			for i := 0; i < 99; i++ {
+				updates = append(updates, Update{
+					Name:         "test",
+					Version:      "1.0",
+					Instructions: fastrand.Bytes(1234),
+				})
+			}
+
+			// Create the transaction
+			txn, err := wt.wal.NewTransaction(updates)
+			if err != nil {
+				return err
+			}
+			wait := txn.SignalSetupComplete()
+			if err := <-wait; err != nil {
+				return err
+			}
+			if err := txn.SignalUpdatesApplied(); err != nil {
+				return err
+			}
+
+			_, w, err := New(wt.path)
+			if err != nil {
+				return err
+			}
+			w.Close()
+			return nil
+		}()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -26,7 +26,7 @@ func (w *WAL) threadedSync() {
 
 		// If the sync fails we should abort to avoid more corruption
 		if err := w.logFile.Sync(); err != nil {
-			panic(build.ExtendErr("Failed to sync wal. Aborting to avoid corruption", err))
+			build.Critical(build.ExtendErr("Failed to sync wal. Aborting to avoid corruption", err))
 		}
 
 		// Signal waiting threads that they can continue execution
