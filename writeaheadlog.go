@@ -219,7 +219,6 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 
 	// Validate metadata
 	recoveryState, err := readWALMetadata(data[0:])
-
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +298,8 @@ func (w *WAL) writeRecoveryState(state uint16) error {
 	if _, err := w.logFile.WriteAt(recoveryState, 0); err != nil {
 		return err
 	}
-	return nil
+	// Sync the new recovery state to disk
+	return w.logFile.Sync()
 }
 
 // RecoveryComplete is called after a wal is recovered to signal that it is
@@ -325,23 +325,12 @@ func (w *WAL) RecoveryComplete() error {
 		return err
 	}
 
-	// Sync after wiping
-	if err := w.logFile.Sync(); err != nil {
-		return err
-	}
-
 	// Set the metadata to unclean again
 	if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
 		return err
 	}
 
-	// Sync to lock down the obliteration.
-	if err := w.logFile.Sync(); err != nil {
-		return err
-	}
-
 	w.recoveryComplete = true
-
 	return nil
 }
 
@@ -506,7 +495,9 @@ func (w *WAL) wipeWAL() error {
 			return err
 		}
 	}
-	return nil
+
+	// Sync the wipe to disk
+	return w.logFile.Sync()
 }
 
 // writeWALMetadata writes WAL metadata to the input file.
