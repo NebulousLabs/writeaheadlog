@@ -319,7 +319,7 @@ func newCountdown(dir string) (*countdownArray, error) {
 
 	// Open the WAL.
 	walFilename := filepath.Join(dir, "wal.dat")
-	updates, wal, err := New(walFilename)
+	updates, wal, err := newWal(walFilename, dependencyUncleanShutdown{})
 	if err != nil {
 		return nil, err
 	}

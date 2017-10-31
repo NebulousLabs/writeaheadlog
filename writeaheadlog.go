@@ -120,14 +120,14 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	// Try opening the WAL file.
 	data, err := deps.readFile(path)
 	if err == nil {
+		// Reuse the existing wal
+		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
+
 		// Recover WAL and return updates
 		updates, err := newWal.recoverWal(data)
 		if err != nil {
 			return nil, nil, err
 		}
-
-		// Reuse the existing wal
-		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
 
 		return updates, &newWal, err
 
@@ -198,7 +198,8 @@ func readWALMetadata(data []byte) (uint16, error) {
 	}
 
 	// Check the fields
-	if recoveryState != recoveryStateUnclean && recoveryState != recoveryStateWipe {
+	if recoveryState != recoveryStateUnclean && recoveryState != recoveryStateWipe &&
+		recoveryState != recoveryStateClean {
 		return 0, errors.New("recoveryState didn't match")
 	}
 	if string(headerData) != metadataHeader {
@@ -218,13 +219,22 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 
 	// Validate metadata
 	recoveryState, err := readWALMetadata(data[0:])
+
 	if err != nil {
 		return nil, err
 	}
 
-	// If recoveryState is set to wipe we don't need to recover
+	if recoveryState == recoveryStateClean {
+		return []Update{}, nil
+	}
+
+	// If recoveryState is set to wipe we don't need to recover but we have to
+	// wipe the wal and change the state
 	if recoveryState == recoveryStateWipe {
 		if err := w.wipeWAL(); err != nil {
+			return nil, err
+		}
+		if err := w.logFile.Sync(); err != nil {
 			return nil, err
 		}
 		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
@@ -285,7 +295,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 func (w *WAL) writeRecoveryState(state uint16) error {
 	// Set the metadata to unclean again
 	recoveryState := make([]byte, 2)
-	binary.LittleEndian.PutUint16(recoveryState, recoveryStateUnclean)
+	binary.LittleEndian.PutUint16(recoveryState, state)
 	if _, err := w.logFile.WriteAt(recoveryState, 0); err != nil {
 		return err
 	}
@@ -544,6 +554,20 @@ func writeWALMetadata(f file) error {
 
 // Close closes the wal and frees used resources
 func (w *WAL) Close() error {
+	if !w.deps.disrupt("UncleanShutdown") {
+		// Set the recovery state to indicate clean shutdown
+		err := w.writeRecoveryState(recoveryStateClean)
+		if err != nil {
+			return err
+		}
+
+		// Make sure the recovery state is written to disk
+		err = w.logFile.Sync()
+		if err != nil {
+			return err
+		}
+	}
+
 	close(w.stopChan)
 	return w.logFile.Close()
 }

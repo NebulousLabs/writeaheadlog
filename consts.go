@@ -17,7 +17,9 @@ const (
 )
 
 const (
-	recoveryStateUnclean = iota
+	recoveryStateInvalid = iota
+	recoveryStateClean
+	recoveryStateUnclean
 	recoveryStateWipe
 )
 

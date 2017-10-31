@@ -15,6 +15,19 @@ import (
 	"github.com/NebulousLabs/fastrand"
 )
 
+//dependencyUncleanShutdown prevnts the wal from marking the logfile as clean
+//upon shutdown
+type dependencyUncleanShutdown struct {
+	prodDependencies
+}
+
+func (dependencyUncleanShutdown) disrupt(s string) bool {
+	if s == "UncleanShutdown" {
+		return true
+	}
+	return false
+}
+
 // dependencyCommitFail corrupts the first page of a transaction when it
 // is committed
 type dependencyCommitFail struct {
@@ -23,6 +36,9 @@ type dependencyCommitFail struct {
 
 func (dependencyCommitFail) disrupt(s string) bool {
 	if s == "CommitFail" {
+		return true
+	}
+	if s == "UncleanShutdown" {
 		return true
 	}
 	return false
@@ -38,6 +54,9 @@ func (dependencyReleaseFail) disrupt(s string) bool {
 	if s == "ReleaseFail" {
 		return true
 	}
+	if s == "UncleanShutdown" {
+		return true
+	}
 	return false
 }
 
@@ -49,6 +68,9 @@ type dependencyRecoveryFail struct {
 
 func (dependencyRecoveryFail) disrupt(s string) bool {
 	if s == "RecoveryFail" {
+		return true
+	}
+	if s == "UncleanShutdown" {
 		return true
 	}
 	return false
@@ -215,7 +237,7 @@ func TestReleaseFailed(t *testing.T) {
 // TestReleaseNotCalled checks if an interrupt between committing and releasing a
 // transaction is handled correctly upon reboot
 func TestReleaseNotCalled(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +298,7 @@ func TestReleaseNotCalled(t *testing.T) {
 // no unfinished transactions should be reported because the second one is
 // assumed to be corrupted too
 func TestPayloadCorrupted(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +362,7 @@ func TestPayloadCorrupted(t *testing.T) {
 // TestPayloadCorrupted2 creates 2 update and corrupts the second one. Therefore
 // one unfinished transaction should be reported
 func TestPayloadCorrupted2(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +577,7 @@ func TestPageRecycling(t *testing.T) {
 
 // TestRestoreTransactions checks that restoring transactions from a WAL works correctly
 func TestRestoreTransactions(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -665,7 +687,7 @@ func TestRestoreTransactions(t *testing.T) {
 // TestRecoveryFailed checks if the WAL behave correctly if a crash occurs
 // during a call to RecoveryComplete
 func TestRecoveryFailed(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyRecoveryFail{})
+	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -694,14 +716,14 @@ func TestRecoveryFailed(t *testing.T) {
 
 	// Close and restart the wal.
 	wt.Close()
-	updates2, w, err := New(wt.path)
+	updates2, w, err := newWal(wt.path, dependencyRecoveryFail{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// New should return 1 update
+	// New should return numUpdates updates
 	if len(updates2) != numUpdates {
-		t.Errorf("There should be %v update but there were %v", numUpdates, len(updates2))
+		t.Errorf("There should be %v updates but there were %v", numUpdates, len(updates2))
 	}
 
 	// Signal that the recovery is complete
@@ -722,6 +744,28 @@ func TestRecoveryFailed(t *testing.T) {
 	// There should be 0 updates this time
 	if len(updates3) != 0 {
 		t.Errorf("There should be %v updates but there were %v", 0, len(updates3))
+	}
+	// The metadata should say "unclean"
+	mdData := make([]byte, pageSize)
+	if _, err := w.logFile.ReadAt(mdData, 0); err != nil {
+		t.Fatal(err)
+	}
+	recoveryState, err := readWALMetadata(mdData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveryState != recoveryStateUnclean {
+		t.Errorf("recoveryState should be %v but was %v",
+			recoveryStateUnclean, recoveryState)
+	}
+
+	// Close the wal again and check that the file still exists on disk
+	if err := w.Close(); err != nil {
+		t.Errorf("Failed to close wal: %v", err)
+	}
+	_, err = os.Stat(wt.path)
+	if os.IsNotExist(err) {
+		t.Errorf("wal was deleted but shouldn't have")
 	}
 }
 
