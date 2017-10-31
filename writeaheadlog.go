@@ -310,7 +310,7 @@ func (w *WAL) RecoveryComplete() error {
 		return err
 	}
 
-	// Sync before we start swiping
+	// Sync before we start wiping
 	if err := w.logFile.Sync(); err != nil {
 		return err
 	}
@@ -325,7 +325,7 @@ func (w *WAL) RecoveryComplete() error {
 		return err
 	}
 
-	// Sync after swiping
+	// Sync after wiping
 	if err := w.logFile.Sync(); err != nil {
 		return err
 	}
