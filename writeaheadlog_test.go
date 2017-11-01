@@ -167,7 +167,7 @@ func TestWALInconsistentSync(t *testing.T) {
 
 	// for 20 seconds, create large transactions and commit them to the wal, then
 	// reopen the WAL. The WAL should stay consistent.
-	for start := time.Now(); time.Since(start) < time.Second*10; time.Sleep(time.Millisecond * 100) {
+	for start := time.Now(); time.Since(start) < time.Second*20; time.Sleep(time.Millisecond * 100) {
 		err := func() error {
 			updates := []Update{}
 			for i := 0; i < 99; i++ {
