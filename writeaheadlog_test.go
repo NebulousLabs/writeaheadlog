@@ -165,10 +165,6 @@ func TestWALInconsistentSync(t *testing.T) {
 	}
 	defer wt.Close()
 
-	// this test generates a lot of build.Criticals. Suppress stderr so it
-	// doesn't create a lot of useless test output.
-	os.Stderr = nil
-
 	// for 20 seconds, create large transactions and commit them to the wal, then
 	// reopen the WAL. The WAL should stay consistent.
 	for start := time.Now(); time.Since(start) < time.Second*10; time.Sleep(time.Millisecond * 100) {

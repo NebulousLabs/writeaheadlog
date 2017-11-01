@@ -124,7 +124,7 @@ func (f *faultyFile) Sync() error {
 type faultyDiskDependency struct{}
 
 func (faultyDiskDependency) disrupt(s string) bool {
-	return false
+	return s == "FaultyDisk"
 }
 func (faultyDiskDependency) readFile(path string) ([]byte, error) {
 	return ioutil.ReadFile(path)
