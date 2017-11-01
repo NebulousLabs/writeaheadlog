@@ -114,7 +114,7 @@ func (w *WAL) allocatePages(numPages int) {
 // newWal initializes and returns a wal.
 func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	// Create a new WAL
-	newWal := WAL{
+	newWal := &WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),
 		path:     path,
@@ -133,7 +133,6 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 
 		// Recover WAL and return updates
 		updates, err := newWal.recoverWal(data)
-
 		return updates, &newWal, err
 
 	} else if !os.IsNotExist(err) {
@@ -146,15 +145,13 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	if err != nil {
 		return nil, nil, build.ExtendErr("walFile could not be created", err)
 	}
-
 	// Write the metadata to the WAL
 	if err = writeWALMetadata(newWal.logFile); err != nil {
 		return nil, nil, build.ExtendErr("Failed to write metadata to file", err)
 	}
-
-	// When we create a new wal we don't need the caller to signal recoveryComplete
+	// No recovery needs to be performed.
 	newWal.recoveryComplete = true
-	return nil, &newWal, nil
+	return nil, newWal, nil
 }
 
 // readWALMetadata reads WAL metadata from the input file, returning an error
