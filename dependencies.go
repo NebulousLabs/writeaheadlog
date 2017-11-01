@@ -87,11 +87,11 @@ func (f *faultyFile) Read(p []byte) (int, error) {
 }
 func (f *faultyFile) Write(p []byte) (int, error) {
 	fail := fastrand.Intn(f.failDenominator) == 0
-	if fail {
+	f.failDenominator++
+	if fail || f.failDenominator >= 5000 {
 		f.failed = true
 		return len(p), nil
 	}
-	f.failDenominator++
 	return f.file.Write(p)
 }
 func (f *faultyFile) Close() error { return f.file.Close() }
@@ -103,11 +103,11 @@ func (f *faultyFile) ReadAt(p []byte, off int64) (int, error) {
 }
 func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	fail := fastrand.Intn(f.failDenominator) == 0
-	if fail {
+	f.failDenominator++
+	if fail || f.failDenominator >= 5000 {
 		f.failed = true
 		return len(p), nil
 	}
-	f.failDenominator++
 	return f.file.WriteAt(p, off)
 }
 func (f *faultyFile) Stat() (os.FileInfo, error) {
@@ -134,12 +134,12 @@ func (faultyDiskDependency) openFile(path string, flag int, perm os.FileMode) (f
 	if err != nil {
 		return nil, err
 	}
-	return &faultyFile{f, false, 2}, nil
+	return &faultyFile{f, false, 3}, nil
 }
 func (faultyDiskDependency) create(path string) (file, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
 	}
-	return &faultyFile{f, false, 2}, nil
+	return &faultyFile{f, false, 3}, nil
 }
