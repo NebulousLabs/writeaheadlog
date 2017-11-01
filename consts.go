@@ -1,11 +1,10 @@
 package wal
 
 const (
+	checksumSize   = 16
 	pageSize       = 4096
-	pageMetaSize   = 64 // 32-byte checksum + 4 uint64s
+	pageMetaSize   = checksumSize + 4*8 // checksum + 4 uint64s
 	maxPayloadSize = pageSize - pageMetaSize
-
-	checksumSize = 32
 )
 
 const (
@@ -28,5 +27,5 @@ const (
 	metadataVersion = "1.0"
 )
 
-// A checksum is a 256-bit blake2b hash.
+// A checksum is a 128-bit blake2b hash.
 type checksum [checksumSize]byte
