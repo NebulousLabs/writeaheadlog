@@ -284,7 +284,9 @@ func (t *Transaction) SignalUpdatesApplied() error {
 	t.wal.mu.Unlock()
 
 	// Decrease the number of active transactions
-	atomic.AddInt64(&t.wal.atomicUnfinishedTxns, -1)
+	if atomic.AddInt64(&t.wal.atomicUnfinishedTxns, -1) < 0 {
+		panic("Sanity check failed. atomicUnfinishedTxns should never be negative")
+	}
 
 	return nil
 }
