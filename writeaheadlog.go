@@ -158,7 +158,7 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 // if the result is unexpected.
 func readWALMetadata(data []byte) (uint16, error) {
 	// The metadata should at least long enough to contain all the fields.
-	if len(data) < metadataHeaderSize + metadataVersionSize + metadataStatusSize {
+	if len(data) < metadataHeaderSize+metadataVersionSize+metadataStatusSize {
 		return 0, errors.New("unable to read wal metadata")
 	}
 

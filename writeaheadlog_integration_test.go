@@ -416,7 +416,7 @@ func TestWALIntegration(t *testing.T) {
 		}
 
 		expectedCountdownLen := 1
-		if r & (1 << 0) == 0 {
+		if r&(1<<0) == 0 {
 			for i := 0; i < 300; i++ {
 				cd, err := newCountdown(dir)
 				if err != nil {
@@ -439,7 +439,7 @@ func TestWALIntegration(t *testing.T) {
 
 		// Continue increasing the count, but this time start performing multiple
 		// transactions between each opening and closing.
-		if r & (1 << 1) == 0 {
+		if r&(1<<1) == 0 {
 			for i := 0; i < 10; i++ {
 				cd, err := newCountdown(dir)
 				if err != nil {
@@ -466,7 +466,7 @@ func TestWALIntegration(t *testing.T) {
 		// Test the durability of the WAL. We'll initialize to simulate a disk
 		// failure after the WAL commits, but before we are able to apply the
 		// commit.
-		if r & (1 << 2) == 0 {
+		if r&(1<<2) == 0 {
 			for i := 0; i < 25; i++ {
 				cd, err := newCountdown(dir)
 				if err != nil {
@@ -518,7 +518,7 @@ func TestWALIntegration(t *testing.T) {
 		// 3 independent sets of these things, so they all have clear dependence
 		// within but no dependence next to. Then we'll update all of them and the
 		// count as well in parallel transactions.
-		if r & (1 << 3) == 0 {
+		if r&(1<<3) == 0 {
 			cd, err := newCountdown(dir)
 			if err != nil {
 				t.Fatal(err)
