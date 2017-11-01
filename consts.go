@@ -22,14 +22,17 @@ const (
 	recoveryStateWipe
 )
 
-const (
-	metadataHeader  = "github.com/NebulousLabs/writeaheadlog\n"
-	metadataVersion = "v1.0.0 \n" // Extra room to allow for versions like v3.1.41
+var (
+	// "github.com/NebulousLabs/writeaheadlog\n"
+	metadataHeader = [38]byte{'g', 'i', 't', 'h', 'u', 'b', '.', 'c', 'o', 'm', '/',
+		'N', 'e', 'b', 'u', 'l', 'o', 'u', 's', 'L', 'a', 'b', 's', '/',
+		'w', 'r', 'i', 't', 'e', 'a', 'h', 'e', 'a', 'd', 'l', 'o', 'g', '\n'}
 
-	// 48 bytes total, intentionally divisible by 16.
-	metadataHeaderSize  = 38
-	metadataVersionSize = 8
-	metadataStatusSize  = 2
+	// "v1.0.0   \n" - 3 spaces left to leave room for vXX.XX.XX\n
+	metadataVersion = [10]byte{'v', '1', '.', '0', '.', '0', ' ', ' ', ' ', '\n'}
+
+	// First byte is the actual value, second byte is the newline.
+	metadataStatusSize = 2
 )
 
 // A checksum is a 128-bit blake2b hash.

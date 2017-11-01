@@ -158,19 +158,23 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 // if the result is unexpected.
 func readWALMetadata(data []byte) (uint16, error) {
 	// The metadata should at least long enough to contain all the fields.
-	if len(data) < metadataHeaderSize+metadataVersionSize+metadataStatusSize {
+	if len(data) < len(metadataHeader)+len(metadataVersion)+metadataStatusSize {
 		return 0, errors.New("unable to read wal metadata")
 	}
 
 	// Check that the header and version match.
-	if string(data[:metadataHeaderSize]) != metadataHeader {
+	if !bytes.Equal(data[:len(metadataHeader)], metadataHeader[:]) {
 		return 0, errors.New("file header is incorrect")
 	}
-	if string(data[metadataHeaderSize:metadataHeaderSize+metadataVersionSize]) != metadataVersion {
+	if !bytes.Equal(data[len(metadataHeader):len(metadataHeader)+len(metadataVersion)], metadataVersion[:]) {
 		return 0, errors.New("file version is unrecognized - maybe you need to upgrade")
 	}
 	// Determine and return the current status of the file.
-	return uint16(data[metadataHeaderSize+metadataVersionSize]), nil
+	fileState := uint16(data[len(metadataHeader)+len(metadataVersion)])
+	if fileState <= 0 || fileState > 3 {
+		return 0, errors.New("file has an invalid/incorrect state")
+	}
+	return fileState, nil
 }
 
 // recover recovers a WAL and returns comitted but not finished updates
@@ -255,7 +259,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 
 // writeRecoveryState is a helper function that changes the recoveryState on disk
 func (w *WAL) writeRecoveryState(state uint16) error {
-	_, err := w.logFile.WriteAt([]byte{byte(state)}, metadataHeaderSize+metadataVersionSize)
+	_, err := w.logFile.WriteAt([]byte{byte(state)}, int64(len(metadataHeader)+len(metadataVersion)))
 	if err != nil {
 		return err
 	}
@@ -463,9 +467,10 @@ func (w *WAL) wipeWAL() error {
 // writeWALMetadata writes WAL metadata to the input file.
 func writeWALMetadata(f file) error {
 	// Create the metadata.
-	data := make([]byte, 0, metadataHeaderSize+metadataVersionSize+metadataStatusSize)
-	data = append(data, []byte(metadataHeader)...)
-	data = append(data, []byte(metadataVersion)...)
+	data := make([]byte, 0, len(metadataHeader)+len(metadataVersion)+metadataStatusSize)
+	data = append(data, metadataHeader[:]...)
+	data = append(data, metadataVersion[:]...)
+	// Penultimate byte is the recovery state, and final byte is a newline.
 	data = append(data, byte(recoveryStateUnclean))
 	data = append(data, byte('\n'))
 	_, err := f.WriteAt(data, 0)
