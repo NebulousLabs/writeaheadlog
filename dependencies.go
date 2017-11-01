@@ -74,17 +74,24 @@ func (prodDependencies) create(path string) (file, error) {
 type faultyFile struct {
 	file   *os.File
 	failed bool
+
+	// failDenominator determins how likely it is that a write will fail, defined
+	// as 1/failDenominator. Each write call increments failDenominator, and it
+	// starts at 2. This means that the more calls to WriteAt, the less likely
+	// the write is to fail.
+	failDenominator int
 }
 
 func (f *faultyFile) Read(p []byte) (int, error) {
 	return f.file.Read(p)
 }
 func (f *faultyFile) Write(p []byte) (int, error) {
-	fail := fastrand.Intn(2) == 0
+	fail := fastrand.Intn(f.failDenominator) == 0
 	if fail {
 		f.failed = true
 		return len(p), nil
 	}
+	f.failDenominator++
 	return f.file.Write(p)
 }
 func (f *faultyFile) Close() error { return f.file.Close() }
@@ -95,11 +102,12 @@ func (f *faultyFile) ReadAt(p []byte, off int64) (int, error) {
 	return f.file.ReadAt(p, off)
 }
 func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
-	fail := fastrand.Intn(2) == 0
+	fail := fastrand.Intn(f.failDenominator) == 0
 	if fail {
 		f.failed = true
 		return len(p), nil
 	}
+	f.failDenominator++
 	return f.file.WriteAt(p, off)
 }
 func (f *faultyFile) Stat() (os.FileInfo, error) {
@@ -126,12 +134,12 @@ func (faultyDiskDependency) openFile(path string, flag int, perm os.FileMode) (f
 	if err != nil {
 		return nil, err
 	}
-	return &faultyFile{f, false}, nil
+	return &faultyFile{f, false, 2}, nil
 }
 func (faultyDiskDependency) create(path string) (file, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
 	}
-	return &faultyFile{f, false}, nil
+	return &faultyFile{f, false, 2}, nil
 }
