@@ -60,25 +60,14 @@ func (dependencyReleaseFail) disrupt(s string) bool {
 type prodDependencies struct{}
 
 func (prodDependencies) disrupt(string) bool { return false }
-
 func (prodDependencies) readFile(path string) ([]byte, error) {
 	return ioutil.ReadFile(path)
 }
-
 func (prodDependencies) openFile(path string, flag int, perm os.FileMode) (file, error) {
 	return os.OpenFile(path, flag, perm)
 }
-
 func (prodDependencies) create(path string) (file, error) {
 	return os.Create(path)
-}
-
-type prodFile struct {
-	*os.File
-}
-
-func (f *prodFile) Seek(offset int64, whence int) (int64, error) {
-	return f.Seek(offset, whence)
 }
 
 // faultyFile implements a file that simulates a faulty disk.
