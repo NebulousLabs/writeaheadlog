@@ -553,21 +553,20 @@ func writeWALMetadata(f file) error {
 func (w *WAL) Close() error {
 	// Check if there are unfinished transactions
 	var err1 error
-	var err2 error
-	var err3 error
-
 	if atomic.LoadInt64(&w.atomicUnfinishedTxns) != 0 {
 		err1 = errors.New("There are still non-released transactions left")
 	}
 
+	// Write the recovery state to indicate clean shutdown if no error occured
 	if err1 == nil && !w.deps.disrupt("UncleanShutdown") {
-		// Set the recovery state to indicate clean shutdown
-		err2 = w.writeRecoveryState(recoveryStateClean)
+		err1 = w.writeRecoveryState(recoveryStateClean)
 	}
 
-	err3 = w.logFile.Close()
+	// Close the logFile and stopChan
+	err2 := w.logFile.Close()
 	close(w.stopChan)
-	return errors.Compose(err1, err2, err3)
+
+	return errors.Compose(err1, err2)
 }
 
 // New will open a WAL. If the previous run did not shut down cleanly, a set of
