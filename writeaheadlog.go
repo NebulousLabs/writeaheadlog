@@ -467,6 +467,7 @@ func writeWALMetadata(f file) error {
 	data = append(data, []byte(metadataHeader)...)
 	data = append(data, []byte(metadataVersion)...)
 	data = append(data, byte(recoveryStateUnclean))
+	data = append(data, byte('\n'))
 	_, err := f.WriteAt(data, 0)
 	return err
 }
