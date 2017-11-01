@@ -23,8 +23,13 @@ const (
 )
 
 const (
-	metadataHeader  = "WAL"
-	metadataVersion = "1.0"
+	metadataHeader  = "github.com/NebulousLabs/writeaheadlog\n"
+	metadataVersion = "v1.0.0  \n" // Extra room to allow for versions like v3.14.15
+
+	// 48 bytes total, intentionally divisible by 16.
+	metadataHeaderSize = 38
+	metadataVersionSize = 9
+	metadataStatusSize = 1
 )
 
 // A checksum is a 128-bit blake2b hash.
