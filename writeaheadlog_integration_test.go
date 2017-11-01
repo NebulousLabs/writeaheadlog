@@ -397,7 +397,6 @@ func newCountdown(dir string) (*countdownArray, error) {
 // TestWALIntegration creates a plausable use case for the WAL and then
 // attempts to utilize all functions of the WAL.
 func TestWALIntegration(t *testing.T) {
-	t.Skip("Test needs to be fixed")
 	if testing.Short() {
 		t.SkipNow()
 	}

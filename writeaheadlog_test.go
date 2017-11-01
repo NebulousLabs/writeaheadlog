@@ -758,9 +758,9 @@ func TestRecoveryFailed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recoveryState != recoveryStateUnclean {
+	if bytes.Compare(recoveryState, metadataShutdownUnclean[:]) != 0 {
 		t.Errorf("recoveryState should be %v but was %v",
-			recoveryStateUnclean, recoveryState)
+			metadataShutdownUnclean, recoveryState)
 	}
 
 	// Close the wal again and check that the file still exists on disk
