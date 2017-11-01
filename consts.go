@@ -16,16 +16,12 @@ const (
 	pageStatusApplied
 )
 
-const (
-	recoveryStateInvalid = iota
-	recoveryStateClean
-	recoveryStateUnclean
-	recoveryStateWipe
-)
-
-const (
-	metadataHeader  = "WAL"
-	metadataVersion = "1.0"
+var (
+	metadataHeader          = [4]byte{'w', 'a', 'l', '\n'}
+	metadataVersion         = [10]byte{'v', '1', '.', '0', '.', '0', '\n'}
+	metadataShutdownClean   = [2]byte{'c', '\n'}
+	metadataShutdownUnclean = [2]byte{'u', '\n'}
+	metadataShutdownWipe    = [2]byte{'s', '\n'}
 )
 
 // A checksum is a 256-bit blake2b hash.
