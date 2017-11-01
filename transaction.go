@@ -92,9 +92,10 @@ type Transaction struct {
 // field of each page
 func (t Transaction) checksum() (c checksum) {
 	h, _ := blake2b.New256(nil)
+	buf := make([]byte, pageSize)
 	for page := t.firstPage; page != nil; page = page.nextPage {
-		// no error possible when writing to h
-		page.writeToNoChecksum(h)
+		b := page.appendTo(buf[:0])
+		h.Write(b[checksumSize:]) // exclude checksum
 	}
 	h.Sum(c[:0])
 	return
@@ -128,9 +129,7 @@ func (t *Transaction) commit(done chan error) {
 		done <- errors.New("Write failed on purpose")
 		return
 	}
-
-	err = t.firstPage.writeToFile(t.wal.logFile)
-	if err != nil {
+	if _, err := t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset)); err != nil {
 		done <- build.ExtendErr("Writing the first page failed", err)
 		return
 	}
@@ -268,7 +267,7 @@ func (t *Transaction) SignalUpdatesApplied() error {
 		// Disk failure causes the commit to fail
 		err = errors.New("Write failed on purpose")
 	} else {
-		err = t.firstPage.writeToFile(t.wal.logFile)
+		_, err = t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset))
 	}
 	if err != nil {
 		return build.ExtendErr("Couldn't write the page to file", err)
@@ -337,9 +336,11 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 
 // writeToFile writes all the pages of the transaction to disk
 func (t *Transaction) writeToFile() error {
+	buf := make([]byte, pageSize)
 	for page := t.firstPage; page != nil; page = page.nextPage {
-		if err := page.writeToFile(t.wal.logFile); err != nil {
-			return err
+		b := page.appendTo(buf[:0])
+		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
+			return build.ExtendErr("Writing the page to disk failed", err)
 		}
 	}
 	return nil

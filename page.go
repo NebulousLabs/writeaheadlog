@@ -1,13 +1,10 @@
 package wal
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
 )
 
@@ -64,7 +61,8 @@ type page struct {
 
 func (p page) size() int { return pageMetaSize + len(p.payload) }
 
-func (p *page) writeToNoChecksum(w io.Writer) error {
+// appendTo appends the marshalled bytes of p to buf, returning the new slice.
+func (p *page) appendTo(buf []byte) []byte {
 	// sanity checks
 	if p.pageStatus == pageStatusInvalid {
 		panic(errors.New("Sanity check failed. Page was marshalled with invalid PageStatus"))
@@ -79,40 +77,21 @@ func (p *page) writeToNoChecksum(w io.Writer) error {
 		nextPagePosition = math.MaxUint64
 	}
 
-	// write pageStatus, transactionNumber, nextPage, and payload size
-	buf := make([]byte, 8+8+8+8)
-	binary.LittleEndian.PutUint64(buf[0:8], p.pageStatus)
-	binary.LittleEndian.PutUint64(buf[8:16], p.transactionNumber)
-	binary.LittleEndian.PutUint64(buf[16:24], nextPagePosition)
-	binary.LittleEndian.PutUint64(buf[24:32], uint64(len(p.payload)))
-	if _, err := w.Write(buf); err != nil {
-		return err
+	// if buf has enough capacity to hold p, use it; otherwise allocate
+	var b []byte
+	if rest := buf[len(buf):]; cap(rest) >= p.size() {
+		b = rest[:p.size()]
+	} else {
+		b = make([]byte, p.size())
 	}
 
-	// write payload
-	if _, err := w.Write(p.payload); err != nil {
-		return err
-	}
+	// write page contents
+	n := copy(b, p.transactionChecksum[:])
+	binary.LittleEndian.PutUint64(b[n:], p.pageStatus)
+	binary.LittleEndian.PutUint64(b[n+8:], p.transactionNumber)
+	binary.LittleEndian.PutUint64(b[n+16:], nextPagePosition)
+	binary.LittleEndian.PutUint64(b[n+24:], uint64(len(p.payload)))
+	copy(b[n+32:], p.payload)
 
-	return nil
-}
-
-func (p *page) writeTo(w io.Writer) error {
-	// write checksum
-	if _, err := w.Write(p.transactionChecksum[:]); err != nil {
-		return err
-	}
-	// write the rest
-	return p.writeToNoChecksum(w)
-}
-
-// WriteToFile writes the page to disk
-func (p page) writeToFile(f file) error {
-	buf := new(bytes.Buffer)
-	p.writeTo(buf)
-	if _, err := f.WriteAt(buf.Bytes(), int64(p.offset)); err != nil {
-		return build.ExtendErr("Writing the page to disk failed", err)
-	}
-
-	return nil
+	return append(buf, b...)
 }

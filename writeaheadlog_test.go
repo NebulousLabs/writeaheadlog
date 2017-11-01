@@ -230,7 +230,7 @@ func TestReleaseFailed(t *testing.T) {
 
 	if len(updates2) != 1 {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
-			0, len(updates2))
+			1, len(updates2))
 	}
 }
 
@@ -334,7 +334,8 @@ func TestPayloadCorrupted(t *testing.T) {
 
 	// Corrupt the payload of the first txn
 	txn.firstPage.payload = fastrand.Bytes(2000)
-	if err := txn.firstPage.writeToFile(wt.wal.logFile); err != nil {
+	_, err = txn.wal.logFile.WriteAt(txn.firstPage.appendTo(nil), int64(txn.firstPage.offset))
+	if err != nil {
 		t.Errorf("Corrupting the page failed %v", err)
 	}
 
@@ -398,7 +399,8 @@ func TestPayloadCorrupted2(t *testing.T) {
 
 	// Corrupt the payload of the second txn
 	txn2.firstPage.payload = fastrand.Bytes(2000)
-	if err := txn2.firstPage.writeToFile(wt.wal.logFile); err != nil {
+	_, err = txn2.wal.logFile.WriteAt(txn2.firstPage.appendTo(nil), int64(txn2.firstPage.offset))
+	if err != nil {
 		t.Errorf("Corrupting the page failed %v", err)
 	}
 
