@@ -6,11 +6,11 @@ package wal
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"math"
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
@@ -69,6 +69,10 @@ type WAL struct {
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
 	deps dependencies
+
+	// atomicUnfinishedTxns counts how many transactions were created but not
+	// released yet. This counter needs to be 0 for the wal to exit cleanly.
+	atomicUnfinishedTxns int64
 }
 
 type (
@@ -121,14 +125,14 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	// Try opening the WAL file.
 	data, err := deps.readFile(path)
 	if err == nil {
-		// Recover WAL and return updates
-		updates, err := newWal.recoverWal(data)
+		// Reuse the existing wal
+		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		// Reuse the existing wal
-		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
+		// Recover WAL and return updates
+		updates, err := newWal.recoverWal(data)
 
 		return updates, &newWal, err
 
@@ -155,17 +159,62 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 
 // readWALMetadata reads WAL metadata from the input file, returning an error
 // if the result is unexpected.
-func readWALMetadata(data []byte) error {
-	var md metadata
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if err := dec.Decode(&md); err != nil {
-		return build.ExtendErr("error reading WAL metadata", err)
-	} else if md.Header != metadataHeader {
-		return errors.New("WAL metadata header does not match header found in WAL file")
-	} else if md.Version != metadataVersion {
-		return errors.New("WAL metadata version does not match version found in WAL file")
+func readWALMetadata(data []byte) (uint16, error) {
+	buffer := bytes.NewBuffer(data)
+
+	// Data should at least be long enough to contain the recoveryState,
+	// headerLength and versionLength
+	if buffer.Len() < 6 {
+		return 0, errors.New("data is too small")
 	}
-	return nil
+
+	// Prepare the variables that store the unmarshalled data
+	var recoveryState uint16
+	var headerLength uint16
+	var versionLength uint16
+
+	// Unmarshal recoveryState
+	if err := binary.Read(buffer, binary.LittleEndian, &recoveryState); err != nil {
+		return 0, build.ExtendErr("failed to unmarshal recovery state", err)
+	}
+
+	// Unmarshal header
+	if err := binary.Read(buffer, binary.LittleEndian, &headerLength); err != nil {
+		return 0, build.ExtendErr("failed to unmarshal headerLength", err)
+	}
+	if uint16(buffer.Len()) < 6+headerLength {
+		return 0, errors.New("buffer is too small to contain headerData")
+	}
+	headerData := make([]byte, headerLength)
+	if _, err := buffer.Read(headerData); err != nil {
+		return 0, build.ExtendErr("failed to read headerData", err)
+	}
+
+	// Unmarshal version
+	if err := binary.Read(buffer, binary.LittleEndian, &versionLength); err != nil {
+		return 0, build.ExtendErr("failed to unmarshal headerLength", err)
+	}
+	if uint16(buffer.Len()) < 6+headerLength+versionLength {
+		return 0, errors.New("buffer is too small to contain versionData")
+	}
+	versionData := make([]byte, versionLength)
+	if _, err := buffer.Read(versionData); err != nil {
+		return 0, build.ExtendErr("failed to read versionData", err)
+	}
+
+	// Check the fields
+	if recoveryState != recoveryStateUnclean && recoveryState != recoveryStateWipe &&
+		recoveryState != recoveryStateClean {
+		return 0, errors.New("recoveryState didn't match")
+	}
+	if string(headerData) != metadataHeader {
+		return 0, errors.New("header didn't match")
+	}
+	if string(versionData) != metadataVersion {
+		return 0, errors.New("version didn't match")
+	}
+
+	return recoveryState, nil
 }
 
 // recover recovers a WAL and returns comitted but not finished updates
@@ -174,9 +223,30 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 	var firstPages ByTxnNumber
 
 	// Validate metadata
-	if err := readWALMetadata(data[0:]); err != nil {
+	recoveryState, err := readWALMetadata(data[0:])
+	if err != nil {
 		return nil, err
 	}
+
+	if recoveryState == recoveryStateClean {
+		return []Update{}, nil
+	}
+
+	// If recoveryState is set to wipe we don't need to recover but we have to
+	// wipe the wal and change the state
+	if recoveryState == recoveryStateWipe {
+		if err := w.wipeWAL(); err != nil {
+			return nil, err
+		}
+		if err := w.logFile.Sync(); err != nil {
+			return nil, err
+		}
+		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
+			return nil, err
+		}
+		return []Update{}, w.logFile.Sync()
+	}
+
 	// Starting at index 1 because the first page is reserved for metadata
 	for i := 1; int64(i)*pageSize < int64(len(data)); i++ {
 		// read the page data
@@ -227,28 +297,45 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 	return updates, nil
 }
 
+// writeRecoveryState is a helper function that changes the recoveryState on disk
+func (w *WAL) writeRecoveryState(state uint16) error {
+	// Set the metadata to unclean again
+	recoveryState := make([]byte, 2)
+	binary.LittleEndian.PutUint16(recoveryState, state)
+	if _, err := w.logFile.WriteAt(recoveryState, 0); err != nil {
+		return err
+	}
+	// Sync the new recovery state to disk
+	return w.logFile.Sync()
+}
+
 // RecoveryComplete is called after a wal is recovered to signal that it is
 // safe to reset the wal
 func (w *WAL) RecoveryComplete() error {
-	// Marshal the pageStatusApplied
-	pageAppliedBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(pageAppliedBytes, pageStatusApplied)
-
-	// Get the length of the file.
-	stat, err := w.logFile.Stat()
-	if err != nil {
+	// Set the metadata to wipe
+	if err := w.writeRecoveryState(recoveryStateWipe); err != nil {
 		return err
 	}
-	length := stat.Size()
 
-	// Set all pages to applied.
-	for offset := int64(pageSize + checksumSize); offset < length; offset += pageSize {
-		if _, err := w.logFile.WriteAt(pageAppliedBytes, offset); err != nil {
-			return err
-		}
+	// Sync before we start wiping
+	if err := w.logFile.Sync(); err != nil {
+		return err
 	}
-	// Sync to lock down the obliteration.
-	w.logFile.Sync()
+
+	// Simulate crash after recovery state was written
+	if w.deps.disrupt("RecoveryFail") {
+		return nil
+	}
+
+	// Wipe the wal
+	if err := w.wipeWAL(); err != nil {
+		return err
+	}
+
+	// Set the metadata to unclean again
+	if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
+		return err
+	}
 
 	w.recoveryComplete = true
 	return nil
@@ -396,33 +483,92 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 	return nil
 }
 
+// wipeWAL sets all the page of the WAL to applied so it can be reused
+func (w *WAL) wipeWAL() error {
+	// Marshal the pageStatusApplied
+	pageAppliedBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(pageAppliedBytes, pageStatusApplied)
+
+	// Get the length of the file.
+	stat, err := w.logFile.Stat()
+	if err != nil {
+		return err
+	}
+	length := stat.Size()
+
+	// Set all pages to applied.
+	for offset := int64(pageSize + checksumSize); offset < length; offset += pageSize {
+		if _, err := w.logFile.WriteAt(pageAppliedBytes, offset); err != nil {
+			return err
+		}
+	}
+
+	// Sync the wipe to disk
+	return w.logFile.Sync()
+}
+
 // writeWALMetadata writes WAL metadata to the input file.
 func writeWALMetadata(f file) error {
-	md := metadata{
-		Header:  metadataHeader,
-		Version: metadataVersion,
-	}
-	changeBytes, err := json.MarshalIndent(md, "", "\t")
-	if err != nil {
-		return build.ExtendErr("could not marshal WAL metadata", err)
-	}
+	buffer := new(bytes.Buffer)
 
+	// Prepare the data that is written to the buffer
+	recoveryState := uint16(recoveryStateUnclean)
+	headerData := []byte(metadataHeader)
+	headerLength := uint16(len(headerData))
+	versionData := []byte(metadataVersion)
+	versionlength := uint16(len(versionData))
+
+	// Write wipe state
+	if err := binary.Write(buffer, binary.LittleEndian, &recoveryState); err != nil {
+		return build.ExtendErr("could not marshal recovery state", err)
+	}
+	// Write header length
+	if err := binary.Write(buffer, binary.LittleEndian, &headerLength); err != nil {
+		return build.ExtendErr("could not marshal header length", err)
+	}
+	// Write header
+	if _, err := buffer.Write(headerData); err != nil {
+		return build.ExtendErr("could not write header", err)
+	}
+	// Write version length
+	if err := binary.Write(buffer, binary.LittleEndian, &versionlength); err != nil {
+		return build.ExtendErr("could not marshal version length", err)
+	}
+	// Write version
+	if _, err := buffer.Write(versionData); err != nil {
+		return build.ExtendErr("could not write version data", err)
+	}
 	// Sanity check. Metadata must not be greater than pageSize
-	if len(changeBytes) > pageSize {
+	if buffer.Len() > pageSize {
 		panic("WAL metadata is greater than pageSize")
 	}
-
-	_, err = f.WriteAt(changeBytes, 0)
+	// Write marshalled data to disk
+	_, err := f.WriteAt(buffer.Bytes(), 0)
 	if err != nil {
 		return build.ExtendErr("unable to write WAL metadata", err)
 	}
 	return nil
 }
 
-// Close closes the wal and frees used resources
+// Close closes the wal, frees used resources and checks for active
+// transactions.
 func (w *WAL) Close() error {
+	// Check if there are unfinished transactions
+	var err1 error
+	if atomic.LoadInt64(&w.atomicUnfinishedTxns) != 0 {
+		err1 = errors.New("There are still non-released transactions left")
+	}
+
+	// Write the recovery state to indicate clean shutdown if no error occured
+	if err1 == nil && !w.deps.disrupt("UncleanShutdown") {
+		err1 = w.writeRecoveryState(recoveryStateClean)
+	}
+
+	// Close the logFile and stopChan
+	err2 := w.logFile.Close()
 	close(w.stopChan)
-	return w.logFile.Close()
+
+	return errors.Compose(err1, err2)
 }
 
 // New will open a WAL. If the previous run did not shut down cleanly, a set of
