@@ -152,6 +152,8 @@ func TestCommitFailed(t *testing.T) {
 // error on sync.
 func TestWALInconsistentSync(t *testing.T) {
 	var wt *walTester
+	// initialize a new wal using the faulty disk dependency. Retry since the
+	// faulty disk can cause initialization to fail
 	err := build.Retry(50, time.Millisecond*100, func() error {
 		tester, err := newWALTester(t.Name(), faultyDiskDependency{})
 		if err != nil {

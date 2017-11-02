@@ -76,7 +76,7 @@ type faultyFile struct {
 	file   *os.File
 	failed bool
 
-	// failDenominator determins how likely it is that a write will fail, defined
+	// failDenominator determines how likely it is that a write will fail, defined
 	// as 1/failDenominator. Each write call increments failDenominator, and it
 	// starts at 2. This means that the more calls to WriteAt, the less likely
 	// the write is to fail. All calls will start automatically failing after
