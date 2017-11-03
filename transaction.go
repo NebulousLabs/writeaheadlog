@@ -227,13 +227,14 @@ func initTransaction(t *Transaction) {
 		return
 	}
 
-	// Get the pages from the wal
+	// Get the pages from the wal and set the first page's status
 	pages := t.wal.managedReservePages(data)
+	pages[0].pageStatus = pageStatusWritten
 
-	// Set the first and final page of the transaction
+	// Set the first page of the transaction
 	t.firstPage = &pages[0]
 
-	// write the pages to disk and set the pageStatus
+	// write the pages to disk
 	if err := t.writeToFile(); err != nil {
 		t.initComplete <- build.ExtendErr("Couldn't write the page to file", err)
 		return
@@ -290,6 +291,97 @@ func (t *Transaction) SignalUpdatesApplied() error {
 	return nil
 }
 
+// append is a helper function to append updates to a transaction on which
+// SignalSetupComplete hasn't been called yet
+func (t *Transaction) append(updates []Update, done chan error) {
+	defer close(done)
+
+	// If there is nothing to append we are done
+	if len(updates) == 0 {
+		return
+	}
+
+	// Make sure that the initialization finished
+	err := <-t.initComplete
+	if err != nil {
+		done <- err
+		return
+	}
+
+	// Append the updates to the transaction
+	t.Updates = append(t.Updates, updates...)
+
+	// Marshal the data
+	data, err := marshalUpdates(updates)
+	if err != nil {
+		done <- errors.Extend(errors.New("failed to marshal new updates"), err)
+		return
+	}
+
+	// Find last page to which we append and count the pages
+	lastPage := t.firstPage
+	for lastPage.nextPage != nil {
+		lastPage = lastPage.nextPage
+	}
+
+	// Write as much data to the last page as possible
+	lenDiff := maxPayloadSize - len(lastPage.payload)
+	if len(data) <= lenDiff {
+		lastPage.payload = append(lastPage.payload, data...)
+		data = nil
+	} else {
+		lastPage.payload = append(lastPage.payload, data[:lenDiff]...)
+		data = data[lenDiff:]
+	}
+
+	// If there is no more data to write we are done
+	if data == nil {
+		return
+	}
+
+	// Get enough pages for the remaining data
+	pages := t.wal.managedReservePages(data)
+	lastPage.nextPage = &pages[0]
+
+	// Write the new pages to disk and sync them
+	buf := make([]byte, pageSize)
+	for _, page := range pages {
+		b := page.appendTo(buf[:0])
+		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
+			done <- build.ExtendErr("Writing the page to disk failed", err)
+			return
+		}
+	}
+	if err := t.wal.logFile.Sync(); err != nil {
+		done <- build.ExtendErr("Syncing the WAL to disk failed", err)
+		return
+	}
+
+	// Link the new pages to the last one and sync the last page
+	b := lastPage.appendTo(buf[:0])
+	if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
+		done <- build.ExtendErr("Writing the last page to disk failed", err)
+		return
+	}
+	if err := t.wal.logFile.Sync(); err != nil {
+		done <- build.ExtendErr("Syncing the last page to disk failed", err)
+		return
+	}
+}
+
+// Append appends additional updates to a transaction
+func (t *Transaction) Append(updates []Update) <-chan error {
+	done := make(chan error, 1)
+
+	if t.setupComplete || t.commitComplete || t.releaseComplete {
+		done <- errors.New("misuse of trnasaction - can't append to transaction once it is committed/released")
+		return done
+	}
+
+	go t.append(updates, done)
+	return done
+}
+
 // SignalSetupComplete will signal to the WAL that any required setup has
 // completed, and that the WAL can safely commit to the transaction being
 // applied atomically.
@@ -334,7 +426,8 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	return &newTransaction, nil
 }
 
-// writeToFile writes all the pages of the transaction to disk
+// writeToFile writes all the pages of the transaction to disk starting at a
+// specified index
 func (t *Transaction) writeToFile() error {
 	buf := make([]byte, pageSize)
 	for page := t.firstPage; page != nil; page = page.nextPage {

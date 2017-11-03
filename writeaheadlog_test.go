@@ -773,6 +773,54 @@ func TestRecoveryFailed(t *testing.T) {
 	}
 }
 
+// TestTransactionAppend tests the functionality of the Transaction's append
+// call
+func TestTransactionAppend(t *testing.T) {
+	wt, err := newWALTester(t.Name(), prodDependencies{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a transaction with 1 update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Version:      "1.0",
+		Instructions: fastrand.Bytes(3000),
+	})
+	// Create one transaction which will be committed and one that will be applied
+	txn, err := wt.wal.NewTransaction(updates)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Append another update
+	if err := <-txn.Append(updates); err != nil {
+		t.Errorf("Append failed: %v", err)
+	}
+
+	// wait for the transactions to be committed
+	wait := txn.SignalSetupComplete()
+	if err := <-wait; err != nil {
+		t.Errorf("SignalSetupComplete for the first transaction failed %v", err)
+	}
+
+	// shutdown the wal
+	wt.Close()
+
+	// Restart it and check if exactly 1 unfinished transaction is reported
+	updates2, w, err := New(wt.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if len(updates2) != len(updates)*2 {
+		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
+			len(updates), len(updates2))
+	}
+}
+
 // benchmarkTransactionSpeed is a helper function to create benchmarks that run
 // for 1 min to find out how many transactions can be applied to the wal and
 // how large the wal grows during that time using a certain number of threads.
