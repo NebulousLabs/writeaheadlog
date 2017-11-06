@@ -426,8 +426,7 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	return &newTransaction, nil
 }
 
-// writeToFile writes all the pages of the transaction to disk starting at a
-// specified index
+// writeToFile writes all the pages of the transaction to disk
 func (t *Transaction) writeToFile() error {
 	buf := make([]byte, pageSize)
 	for page := t.firstPage; page != nil; page = page.nextPage {

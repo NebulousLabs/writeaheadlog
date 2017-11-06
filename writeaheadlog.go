@@ -154,7 +154,6 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 
 	// When we create a new wal we don't need the caller to signal recoveryComplete
 	newWal.recoveryComplete = true
-
 	return nil, &newWal, nil
 }
 
