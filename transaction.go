@@ -349,10 +349,7 @@ func (t *Transaction) append(updates []Update, done chan error) {
 			return
 		}
 	}
-	if err := t.wal.logFile.Sync(); err != nil {
-		done <- build.ExtendErr("Syncing the WAL to disk failed", err)
-		return
-	}
+	t.wal.fSync()
 
 	// Link the new pages to the last one and sync the last page
 	b := lastPage.appendTo(buf[:0])
@@ -360,10 +357,7 @@ func (t *Transaction) append(updates []Update, done chan error) {
 		done <- build.ExtendErr("Writing the last page to disk failed", err)
 		return
 	}
-	if err := t.wal.logFile.Sync(); err != nil {
-		done <- build.ExtendErr("Syncing the last page to disk failed", err)
-		return
-	}
+	t.wal.fSync()
 
 	// Append the updates to the transaction
 	t.Updates = append(t.Updates, updates...)
