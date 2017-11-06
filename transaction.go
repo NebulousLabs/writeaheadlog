@@ -83,9 +83,11 @@ type Transaction struct {
 
 	// The wal that was used to create the transaction
 	wal *WAL
-	// An internal channel to signal that the transaction was initialized and
-	// can be committed
-	initComplete chan error
+	// initComplete is used to signal if initializing the transaction is complete
+	initComplete chan struct{}
+	// initErr stores possible errors that might have occured during
+	// initialization
+	initErr error
 }
 
 // checksum calculates the checksum of a transaction excluding the checksum
@@ -107,9 +109,9 @@ func (t *Transaction) commit(done chan error) {
 	defer close(done)
 
 	// Make sure that the initialization of the transaction finished
-	err := <-t.initComplete
-	if err != nil {
-		done <- err
+	<-t.initComplete
+	if t.initErr != nil {
+		done <- t.initErr
 		return
 	}
 
@@ -223,7 +225,7 @@ func initTransaction(t *Transaction) {
 	// Marshal all the updates to get their total length on disk
 	data, err := marshalUpdates(t.Updates)
 	if err != nil {
-		t.initComplete <- build.ExtendErr("could not marshal update", err)
+		t.initErr = build.ExtendErr("could not marshal update", err)
 		return
 	}
 
@@ -236,7 +238,7 @@ func initTransaction(t *Transaction) {
 
 	// write the pages to disk
 	if err := t.writeToFile(); err != nil {
-		t.initComplete <- build.ExtendErr("Couldn't write the page to file", err)
+		t.initErr = build.ExtendErr("Couldn't write the page to file", err)
 		return
 	}
 }
@@ -302,9 +304,9 @@ func (t *Transaction) append(updates []Update, done chan error) {
 	}
 
 	// Make sure that the initialization finished
-	err := <-t.initComplete
-	if err != nil {
-		done <- err
+	<-t.initComplete
+	if t.initErr != nil {
+		done <- t.initErr
 		return
 	}
 
@@ -407,7 +409,7 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	newTransaction := Transaction{
 		Updates:      updates,
 		wal:          w,
-		initComplete: make(chan error),
+		initComplete: make(chan struct{}),
 	}
 
 	// Initialize the transaction by splitting up the payload among free pages
