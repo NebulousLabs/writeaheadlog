@@ -308,9 +308,6 @@ func (t *Transaction) append(updates []Update, done chan error) {
 		return
 	}
 
-	// Append the updates to the transaction
-	t.Updates = append(t.Updates, updates...)
-
 	// Marshal the data
 	data, err := marshalUpdates(updates)
 	if err != nil {
@@ -367,6 +364,9 @@ func (t *Transaction) append(updates []Update, done chan error) {
 		done <- build.ExtendErr("Syncing the last page to disk failed", err)
 		return
 	}
+
+	// Append the updates to the transaction
+	t.Updates = append(t.Updates, updates...)
 }
 
 // Append appends additional updates to a transaction
