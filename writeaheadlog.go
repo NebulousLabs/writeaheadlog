@@ -1,7 +1,7 @@
-// Package wal defines and implements a general purpose, high performance
-// write-ahead-log for performing ACID transactions to disk without sacrificing
-// speed or latency more than fundamentally required.
-package wal
+// Package writeaheadlog defines and implements a general purpose, high
+// performance write-ahead-log for performing ACID transactions to disk without
+// sacrificing speed or latency more than fundamentally required.
+package writeaheadlog
 
 import (
 	"bytes"

@@ -1,4 +1,4 @@
-package wal
+package writeaheadlog
 
 const (
 	checksumSize   = 16
