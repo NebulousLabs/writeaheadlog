@@ -1,4 +1,4 @@
-package wal
+package writeaheadlog
 
 import (
 	"github.com/NebulousLabs/Sia/build"
