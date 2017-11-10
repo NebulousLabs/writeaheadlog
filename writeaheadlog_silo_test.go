@@ -62,9 +62,9 @@ func newSilo(offset int64, length int, f *os.File) *silo {
 // marshal marshals a siloUpdate
 func (su siloUpdate) marshal() []byte {
 	data := make([]byte, 24)
-	binary.PutVarint(data[0:8], su.offset)
+	binary.LittleEndian.PutUint64(data[0:8], uint64(su.offset))
 	binary.LittleEndian.PutUint32(data[8:12], su.number)
-	binary.PutVarint(data[12:], su.silo)
+	binary.LittleEndian.PutUint64(data[12:], uint64(su.silo))
 	return data
 }
 
@@ -73,9 +73,9 @@ func (su *siloUpdate) unmarshal(data []byte) {
 	if len(data) != 24 {
 		panic("data has wrong size")
 	}
-	su.offset, _ = binary.Varint(data[0:8])
+	su.offset = int64(binary.LittleEndian.Uint64(data[0:8]))
 	su.number = binary.LittleEndian.Uint32(data[8:12])
-	su.silo, _ = binary.Varint(data[12:])
+	su.silo = int64(binary.LittleEndian.Uint64(data[12:]))
 	return
 }
 
@@ -106,7 +106,7 @@ func (s *silo) updateChecksum() {
 		binary.LittleEndian.PutUint32(buf[i*4:i*4+4], s.numbers[i])
 	}
 	cs := blake2b.Sum256(buf)
-	copy(s.cs[:], cs[0:checksumSize])
+	copy(s.cs[:], cs[:])
 }
 
 // applyUpdate applies an update to the silo
@@ -164,8 +164,7 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
 	s.f.Sync()
 }
 
-// threadedUpdate updates a silo until stopChan is closed. This leaves the last
-// transaction unfinished and therefore corrupt.
+// threadedUpdate updates a silo 1000 times and leaves the last transaction unapplied.
 func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.WaitGroup) {
 	defer wg.Done()
 
