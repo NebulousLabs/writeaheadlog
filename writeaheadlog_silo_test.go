@@ -154,6 +154,10 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
 		done <- err
 		return
 	}
+	if err := newFile.Close(); err != nil {
+		done <- err
+		return
+	}
 
 	// sync changes
 	newFile.Sync()
