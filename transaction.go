@@ -141,30 +141,24 @@ func (t *Transaction) commit(done chan error) {
 }
 
 // marshalUpdates marshals the updates of a transaction
-func marshalUpdates(updates []Update) ([]byte, error) {
+func marshalUpdates(updates []Update) []byte {
 	buffer := new(bytes.Buffer)
-
 	for _, update := range updates {
 		// Marshal name
 		name := []byte(update.Name)
-		err1 := binary.Write(buffer, binary.LittleEndian, uint64(len(name)))
-		_, err2 := buffer.Write(name)
+		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(name)))
+		_, _ = buffer.Write(name)
 
 		// Marshal version
 		version := []byte(update.Version)
-		err3 := binary.Write(buffer, binary.LittleEndian, uint64(len(version)))
-		_, err4 := buffer.Write(version)
+		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(version)))
+		_, _ = buffer.Write(version)
 
 		// Append instructions
-		err5 := binary.Write(buffer, binary.LittleEndian, uint64(len(update.Instructions)))
-		_, err6 := buffer.Write(update.Instructions)
-
-		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
-			return nil, errors.Compose(errors.New("Failed to marshal updates"), err1, err2, err3, err4, err5, err6)
-		}
+		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(update.Instructions)))
+		_, _ = buffer.Write(update.Instructions)
 	}
-
-	return buffer.Bytes(), nil
+	return buffer.Bytes()
 }
 
 // unmarshalUpdates unmarshals the updates of a transaction
@@ -223,11 +217,7 @@ func initTransaction(t *Transaction) {
 	defer close(t.initComplete)
 
 	// Marshal all the updates to get their total length on disk
-	data, err := marshalUpdates(t.Updates)
-	if err != nil {
-		t.initErr = build.ExtendErr("could not marshal update", err)
-		return
-	}
+	data := marshalUpdates(t.Updates)
 
 	// Get the pages from the wal and set the first page's status
 	pages := t.wal.managedReservePages(data)
@@ -311,11 +301,7 @@ func (t *Transaction) append(updates []Update, done chan error) {
 	}
 
 	// Marshal the data
-	data, err := marshalUpdates(updates)
-	if err != nil {
-		done <- errors.Extend(errors.New("failed to marshal new updates"), err)
-		return
-	}
+	data := marshalUpdates(updates)
 
 	// Find last page to which we append and count the pages
 	lastPage := t.firstPage
