@@ -83,9 +83,11 @@ type Transaction struct {
 
 	// The wal that was used to create the transaction
 	wal *WAL
-	// An internal channel to signal that the transaction was initialized and
-	// can be committed
-	initComplete chan error
+	// initComplete is used to signal if initializing the transaction is complete
+	initComplete chan struct{}
+	// initErr stores possible errors that might have occured during
+	// initialization
+	initErr error
 }
 
 // checksum calculates the checksum of a transaction excluding the checksum
@@ -107,9 +109,9 @@ func (t *Transaction) commit(done chan error) {
 	defer close(done)
 
 	// Make sure that the initialization of the transaction finished
-	err := <-t.initComplete
-	if err != nil {
-		done <- err
+	<-t.initComplete
+	if t.initErr != nil {
+		done <- t.initErr
 		return
 	}
 
@@ -139,30 +141,24 @@ func (t *Transaction) commit(done chan error) {
 }
 
 // marshalUpdates marshals the updates of a transaction
-func marshalUpdates(updates []Update) ([]byte, error) {
+func marshalUpdates(updates []Update) []byte {
 	buffer := new(bytes.Buffer)
-
 	for _, update := range updates {
 		// Marshal name
 		name := []byte(update.Name)
-		err1 := binary.Write(buffer, binary.LittleEndian, uint64(len(name)))
-		_, err2 := buffer.Write(name)
+		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(name)))
+		_, _ = buffer.Write(name)
 
 		// Marshal version
 		version := []byte(update.Version)
-		err3 := binary.Write(buffer, binary.LittleEndian, uint64(len(version)))
-		_, err4 := buffer.Write(version)
+		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(version)))
+		_, _ = buffer.Write(version)
 
 		// Append instructions
-		err5 := binary.Write(buffer, binary.LittleEndian, uint64(len(update.Instructions)))
-		_, err6 := buffer.Write(update.Instructions)
-
-		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
-			return nil, errors.Compose(errors.New("Failed to marshal updates"), err1, err2, err3, err4, err5, err6)
-		}
+		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(update.Instructions)))
+		_, _ = buffer.Write(update.Instructions)
 	}
-
-	return buffer.Bytes(), nil
+	return buffer.Bytes()
 }
 
 // unmarshalUpdates unmarshals the updates of a transaction
@@ -221,21 +217,18 @@ func initTransaction(t *Transaction) {
 	defer close(t.initComplete)
 
 	// Marshal all the updates to get their total length on disk
-	data, err := marshalUpdates(t.Updates)
-	if err != nil {
-		t.initComplete <- build.ExtendErr("could not marshal update", err)
-		return
-	}
+	data := marshalUpdates(t.Updates)
 
-	// Get the pages from the wal
+	// Get the pages from the wal and set the first page's status
 	pages := t.wal.managedReservePages(data)
+	pages[0].pageStatus = pageStatusWritten
 
-	// Set the first and final page of the transaction
+	// Set the first page of the transaction
 	t.firstPage = &pages[0]
 
-	// write the pages to disk and set the pageStatus
+	// write the pages to disk
 	if err := t.writeToFile(); err != nil {
-		t.initComplete <- build.ExtendErr("Couldn't write the page to file", err)
+		t.initErr = build.ExtendErr("Couldn't write the page to file", err)
 		return
 	}
 }
@@ -290,6 +283,87 @@ func (t *Transaction) SignalUpdatesApplied() error {
 	return nil
 }
 
+// append is a helper function to append updates to a transaction on which
+// SignalSetupComplete hasn't been called yet
+func (t *Transaction) append(updates []Update, done chan error) {
+	defer close(done)
+
+	// If there is nothing to append we are done
+	if len(updates) == 0 {
+		return
+	}
+
+	// Make sure that the initialization finished
+	<-t.initComplete
+	if t.initErr != nil {
+		done <- t.initErr
+		return
+	}
+
+	// Marshal the data
+	data := marshalUpdates(updates)
+
+	// Find last page to which we append and count the pages
+	lastPage := t.firstPage
+	for lastPage.nextPage != nil {
+		lastPage = lastPage.nextPage
+	}
+
+	// Write as much data to the last page as possible
+	lenDiff := maxPayloadSize - len(lastPage.payload)
+	if len(data) <= lenDiff {
+		lastPage.payload = append(lastPage.payload, data...)
+		data = nil
+	} else {
+		lastPage.payload = append(lastPage.payload, data[:lenDiff]...)
+		data = data[lenDiff:]
+	}
+
+	// If there is no more data to write we are done
+	if data == nil {
+		return
+	}
+
+	// Get enough pages for the remaining data
+	pages := t.wal.managedReservePages(data)
+	lastPage.nextPage = &pages[0]
+
+	// Write the new pages to disk and sync them
+	buf := make([]byte, pageSize)
+	for _, page := range pages {
+		b := page.appendTo(buf[:0])
+		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
+			done <- build.ExtendErr("Writing the page to disk failed", err)
+			return
+		}
+	}
+	t.wal.fSync()
+
+	// Link the new pages to the last one and sync the last page
+	b := lastPage.appendTo(buf[:0])
+	if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
+		done <- build.ExtendErr("Writing the last page to disk failed", err)
+		return
+	}
+	t.wal.fSync()
+
+	// Append the updates to the transaction
+	t.Updates = append(t.Updates, updates...)
+}
+
+// Append appends additional updates to a transaction
+func (t *Transaction) Append(updates []Update) <-chan error {
+	done := make(chan error, 1)
+
+	if t.setupComplete || t.commitComplete || t.releaseComplete {
+		done <- errors.New("misuse of trnasaction - can't append to transaction once it is committed/released")
+		return done
+	}
+
+	go t.append(updates, done)
+	return done
+}
+
 // SignalSetupComplete will signal to the WAL that any required setup has
 // completed, and that the WAL can safely commit to the transaction being
 // applied atomically.
@@ -321,7 +395,7 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	newTransaction := Transaction{
 		Updates:      updates,
 		wal:          w,
-		initComplete: make(chan error),
+		initComplete: make(chan struct{}),
 	}
 
 	// Initialize the transaction by splitting up the payload among free pages

@@ -299,7 +299,8 @@ func (w *WAL) RecoveryComplete() error {
 }
 
 // managedReservePages reserves pages for a given payload. If it needs to
-// allocate new pages it will do so
+// allocate new pages it will do so. The pageStatus of the first page needs to
+// be set manually.
 func (w *WAL) managedReservePages(data []byte) []page {
 	// Find out how many pages are needed for the payload
 	numPages := len(data) / MaxPayloadSize
@@ -335,12 +336,8 @@ func (w *WAL) managedReservePages(data []byte) []page {
 			pages[i].nextPage = &pages[i+1]
 		}
 
-		// Set pageStatus of the first page to pageStatusWritten
-		if i == 0 {
-			pages[i].pageStatus = pageStatusWritten
-		} else {
-			pages[i].pageStatus = pageStatusOther
-		}
+		// Set pageStatus of all pages to pageStatusOther
+		pages[i].pageStatus = pageStatusOther
 
 		// Copy part of the update into the payload
 		payloadsize := MaxPayloadSize
