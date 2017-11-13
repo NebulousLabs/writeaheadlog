@@ -51,7 +51,7 @@ func BenchmarkPageAppendTo(b *testing.B) {
 	p := page{
 		offset:            4096,
 		transactionNumber: 42,
-		payload:           fastrand.Bytes(maxPayloadSize), // ensure marshalled size is 4096 bytes
+		payload:           fastrand.Bytes(MaxPayloadSize), // ensure marshalled size is 4096 bytes
 		pageStatus:        pageStatusComitted,
 		nextPage: &page{
 			offset: 12345,

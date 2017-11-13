@@ -302,8 +302,8 @@ func (w *WAL) RecoveryComplete() error {
 // allocate new pages it will do so
 func (w *WAL) managedReservePages(data []byte) []page {
 	// Find out how many pages are needed for the payload
-	numPages := len(data) / maxPayloadSize
-	if len(data)%maxPayloadSize != 0 {
+	numPages := len(data) / MaxPayloadSize
+	if len(data)%MaxPayloadSize != 0 {
 		numPages++
 	}
 
@@ -343,12 +343,12 @@ func (w *WAL) managedReservePages(data []byte) []page {
 		}
 
 		// Copy part of the update into the payload
-		payloadsize := maxPayloadSize
-		if len(data[i*maxPayloadSize:]) < payloadsize {
-			payloadsize = len(data[i*maxPayloadSize:])
+		payloadsize := MaxPayloadSize
+		if len(data[i*MaxPayloadSize:]) < payloadsize {
+			payloadsize = len(data[i*MaxPayloadSize:])
 		}
 		pages[i].payload = make([]byte, payloadsize)
-		copy(pages[i].payload, data[i*maxPayloadSize:])
+		copy(pages[i].payload, data[i*MaxPayloadSize:])
 	}
 
 	return pages
