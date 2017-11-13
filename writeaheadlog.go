@@ -114,7 +114,7 @@ func (w *WAL) allocatePages(numPages int) {
 // newWal initializes and returns a wal.
 func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	// Create a new WAL
-	newWal := WAL{
+	newWal := &WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),
 		path:     path,
@@ -133,8 +133,7 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 
 		// Recover WAL and return updates
 		updates, err := newWal.recoverWal(data)
-
-		return updates, &newWal, err
+		return updates, newWal, err
 
 	} else if !os.IsNotExist(err) {
 		// the file exists but couldn't be opened
@@ -146,75 +145,36 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	if err != nil {
 		return nil, nil, build.ExtendErr("walFile could not be created", err)
 	}
-
 	// Write the metadata to the WAL
 	if err = writeWALMetadata(newWal.logFile); err != nil {
 		return nil, nil, build.ExtendErr("Failed to write metadata to file", err)
 	}
-
-	// When we create a new wal we don't need the caller to signal recoveryComplete
+	// No recovery needs to be performed.
 	newWal.recoveryComplete = true
-	return nil, &newWal, nil
+	return nil, newWal, nil
 }
 
 // readWALMetadata reads WAL metadata from the input file, returning an error
 // if the result is unexpected.
 func readWALMetadata(data []byte) (uint16, error) {
-	buffer := bytes.NewBuffer(data)
-
-	// Data should at least be long enough to contain the recoveryState,
-	// headerLength and versionLength
-	if buffer.Len() < 6 {
-		return 0, errors.New("data is too small")
+	// The metadata should at least long enough to contain all the fields.
+	if len(data) < len(metadataHeader)+len(metadataVersion)+metadataStatusSize {
+		return 0, errors.New("unable to read wal metadata")
 	}
 
-	// Prepare the variables that store the unmarshalled data
-	var recoveryState uint16
-	var headerLength uint16
-	var versionLength uint16
-
-	// Unmarshal recoveryState
-	if err := binary.Read(buffer, binary.LittleEndian, &recoveryState); err != nil {
-		return 0, build.ExtendErr("failed to unmarshal recovery state", err)
+	// Check that the header and version match.
+	if !bytes.Equal(data[:len(metadataHeader)], metadataHeader[:]) {
+		return 0, errors.New("file header is incorrect")
 	}
-
-	// Unmarshal header
-	if err := binary.Read(buffer, binary.LittleEndian, &headerLength); err != nil {
-		return 0, build.ExtendErr("failed to unmarshal headerLength", err)
+	if !bytes.Equal(data[len(metadataHeader):len(metadataHeader)+len(metadataVersion)], metadataVersion[:]) {
+		return 0, errors.New("file version is unrecognized - maybe you need to upgrade")
 	}
-	if uint16(buffer.Len()) < 6+headerLength {
-		return 0, errors.New("buffer is too small to contain headerData")
+	// Determine and return the current status of the file.
+	fileState := uint16(data[len(metadataHeader)+len(metadataVersion)])
+	if fileState <= 0 || fileState > 3 {
+		return 0, errors.New("file has an invalid/incorrect state")
 	}
-	headerData := make([]byte, headerLength)
-	if _, err := buffer.Read(headerData); err != nil {
-		return 0, build.ExtendErr("failed to read headerData", err)
-	}
-
-	// Unmarshal version
-	if err := binary.Read(buffer, binary.LittleEndian, &versionLength); err != nil {
-		return 0, build.ExtendErr("failed to unmarshal headerLength", err)
-	}
-	if uint16(buffer.Len()) < 6+headerLength+versionLength {
-		return 0, errors.New("buffer is too small to contain versionData")
-	}
-	versionData := make([]byte, versionLength)
-	if _, err := buffer.Read(versionData); err != nil {
-		return 0, build.ExtendErr("failed to read versionData", err)
-	}
-
-	// Check the fields
-	if recoveryState != recoveryStateUnclean && recoveryState != recoveryStateWipe &&
-		recoveryState != recoveryStateClean {
-		return 0, errors.New("recoveryState didn't match")
-	}
-	if string(headerData) != metadataHeader {
-		return 0, errors.New("header didn't match")
-	}
-	if string(versionData) != metadataVersion {
-		return 0, errors.New("version didn't match")
-	}
-
-	return recoveryState, nil
+	return fileState, nil
 }
 
 // recover recovers a WAL and returns comitted but not finished updates
@@ -299,13 +259,10 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 
 // writeRecoveryState is a helper function that changes the recoveryState on disk
 func (w *WAL) writeRecoveryState(state uint16) error {
-	// Set the metadata to unclean again
-	recoveryState := make([]byte, 2)
-	binary.LittleEndian.PutUint16(recoveryState, state)
-	if _, err := w.logFile.WriteAt(recoveryState, 0); err != nil {
+	_, err := w.logFile.WriteAt([]byte{byte(state)}, int64(len(metadataHeader)+len(metadataVersion)))
+	if err != nil {
 		return err
 	}
-	// Sync the new recovery state to disk
 	return w.logFile.Sync()
 }
 
@@ -509,45 +466,15 @@ func (w *WAL) wipeWAL() error {
 
 // writeWALMetadata writes WAL metadata to the input file.
 func writeWALMetadata(f file) error {
-	buffer := new(bytes.Buffer)
-
-	// Prepare the data that is written to the buffer
-	recoveryState := uint16(recoveryStateUnclean)
-	headerData := []byte(metadataHeader)
-	headerLength := uint16(len(headerData))
-	versionData := []byte(metadataVersion)
-	versionlength := uint16(len(versionData))
-
-	// Write wipe state
-	if err := binary.Write(buffer, binary.LittleEndian, &recoveryState); err != nil {
-		return build.ExtendErr("could not marshal recovery state", err)
-	}
-	// Write header length
-	if err := binary.Write(buffer, binary.LittleEndian, &headerLength); err != nil {
-		return build.ExtendErr("could not marshal header length", err)
-	}
-	// Write header
-	if _, err := buffer.Write(headerData); err != nil {
-		return build.ExtendErr("could not write header", err)
-	}
-	// Write version length
-	if err := binary.Write(buffer, binary.LittleEndian, &versionlength); err != nil {
-		return build.ExtendErr("could not marshal version length", err)
-	}
-	// Write version
-	if _, err := buffer.Write(versionData); err != nil {
-		return build.ExtendErr("could not write version data", err)
-	}
-	// Sanity check. Metadata must not be greater than pageSize
-	if buffer.Len() > pageSize {
-		panic("WAL metadata is greater than pageSize")
-	}
-	// Write marshalled data to disk
-	_, err := f.WriteAt(buffer.Bytes(), 0)
-	if err != nil {
-		return build.ExtendErr("unable to write WAL metadata", err)
-	}
-	return nil
+	// Create the metadata.
+	data := make([]byte, 0, len(metadataHeader)+len(metadataVersion)+metadataStatusSize)
+	data = append(data, metadataHeader[:]...)
+	data = append(data, metadataVersion[:]...)
+	// Penultimate byte is the recovery state, and final byte is a newline.
+	data = append(data, byte(recoveryStateUnclean))
+	data = append(data, byte('\n'))
+	_, err := f.WriteAt(data, 0)
+	return err
 }
 
 // Close closes the wal, frees used resources and checks for active

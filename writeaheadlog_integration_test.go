@@ -11,7 +11,6 @@ import (
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
-	"github.com/NebulousLabs/fastrand"
 )
 
 const (
@@ -397,15 +396,8 @@ func newCountdown(dir string) (*countdownArray, error) {
 // TestWALIntegration creates a plausable use case for the WAL and then
 // attempts to utilize all functions of the WAL.
 func TestWALIntegration(t *testing.T) {
-	t.Skip("Test needs to be fixed")
 	if testing.Short() {
 		t.SkipNow()
-	}
-	// Create a folder to house everything we are working with.
-	dir := build.TempDir("wal", t.Name())
-	err := os.MkdirAll(dir, 0700)
-	if err != nil {
-		t.Fatal(err)
 	}
 
 	// Create the countdown and extend the count out to 250, closing and
@@ -415,141 +407,150 @@ func TestWALIntegration(t *testing.T) {
 	//
 	// 'newCountdown' will chcek that the file is consistent, and detect that
 	// updates are being applied correctly.
-	expectedCountdownLen := 1
-	if fastrand.Intn(2) != 0 {
-		for i := 0; i < 300; i++ {
-			cd, err := newCountdown(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(cd.countdown) != expectedCountdownLen {
-				t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
-			}
-			err = cd.addCount()
-			if err != nil {
-				t.Fatal(err)
-			}
-			expectedCountdownLen++
-			err = cd.Close()
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-
-	// Continue increasing the count, but this time start performing multiple
-	// transactions between each opening and closing.
-	if fastrand.Intn(2) != 0 {
-		for i := 0; i < 10; i++ {
-			cd, err := newCountdown(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if len(cd.countdown) != expectedCountdownLen {
-				t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
-			}
-			for j := 0; j < i; j++ {
-				err = cd.addCount()
-				if err != nil {
-					t.Fatal(err)
-				}
-				expectedCountdownLen++
-			}
-			err = cd.Close()
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-
-	// Test the durability of the WAL. We'll initialize to simulate a disk
-	// failure after the WAL commits, but before we are able to apply the
-	// commit.
-	if fastrand.Intn(2) != 0 {
-		for i := 0; i < 25; i++ {
-			cd, err := newCountdown(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(cd.countdown) != expectedCountdownLen {
-				t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
-			}
-
-			// Add some legitimate counts.
-			for j := 0; j < i; j++ {
-				err = cd.addCount()
-				if err != nil {
-					t.Fatal(err)
-				}
-				expectedCountdownLen++
-			}
-
-			// Add a broken count. Because the break is after the WAL commits, the
-			// count should still restore correctly on the next iteration where we
-			// call 'newCountdown'.
-			err = cd.addCountBroken()
-			if err != nil {
-				t.Fatal(err)
-			}
-			expectedCountdownLen++
-			err = cd.Close()
-			if err == nil {
-				t.Fatal("Should have returned an error but didn't")
-			}
-		}
-
-		// Check at this point that the wal is less than 100 pages.
-		info, err := os.Stat(filepath.Join(dir, "wal.dat"))
+	for r := 0; r < 16; r++ {
+		// Create a folder to house everything we are working with.
+		dir := build.TempDir("wal", t.Name())
+		err := os.MkdirAll(dir, 0700)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Size() > 100*pageSize {
-			t.Error("the wal is too large")
-		}
-	}
 
-	// Test the parallelism. Basic way to do that is to have a second file that
-	// we update in parallel transactions. But I'd also like to be able to test
-	// parallel transactions that act on the same file? Not sure if that's
-	// strictly necessary. But we could have a second file that perhaps tracks
-	// two unrelated fields, like 5 integer arrays that are all intialized with
-	// the same integers, over 10kb or something. And then that file could have
-	// 3 independent sets of these things, so they all have clear dependence
-	// within but no dependence next to. Then we'll update all of them and the
-	// count as well in parallel transactions.
-	if fastrand.Intn(2) != 0 {
+		expectedCountdownLen := 1
+		if r&(1<<0) == 0 {
+			for i := 0; i < 300; i++ {
+				cd, err := newCountdown(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(cd.countdown) != expectedCountdownLen {
+					t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+				}
+				err = cd.addCount()
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedCountdownLen++
+				err = cd.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+
+		// Continue increasing the count, but this time start performing multiple
+		// transactions between each opening and closing.
+		if r&(1<<1) == 0 {
+			for i := 0; i < 10; i++ {
+				cd, err := newCountdown(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if len(cd.countdown) != expectedCountdownLen {
+					t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+				}
+				for j := 0; j < i; j++ {
+					err = cd.addCount()
+					if err != nil {
+						t.Fatal(err)
+					}
+					expectedCountdownLen++
+				}
+				err = cd.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+
+		// Test the durability of the WAL. We'll initialize to simulate a disk
+		// failure after the WAL commits, but before we are able to apply the
+		// commit.
+		if r&(1<<2) == 0 {
+			for i := 0; i < 25; i++ {
+				cd, err := newCountdown(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(cd.countdown) != expectedCountdownLen {
+					t.Fatal("coundown is incorrect", len(cd.countdown), expectedCountdownLen)
+				}
+
+				// Add some legitimate counts.
+				for j := 0; j < i; j++ {
+					err = cd.addCount()
+					if err != nil {
+						t.Fatal(err)
+					}
+					expectedCountdownLen++
+				}
+
+				// Add a broken count. Because the break is after the WAL commits, the
+				// count should still restore correctly on the next iteration where we
+				// call 'newCountdown'.
+				err = cd.addCountBroken()
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedCountdownLen++
+				err = cd.Close()
+				if err == nil {
+					t.Fatal("Should have returned an error but didn't")
+				}
+			}
+
+			// Check at this point that the wal is less than 100 pages.
+			info, err := os.Stat(filepath.Join(dir, "wal.dat"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() > 100*pageSize {
+				t.Error("the wal is too large")
+			}
+		}
+
+		// Test the parallelism. Basic way to do that is to have a second file that
+		// we update in parallel transactions. But I'd also like to be able to test
+		// parallel transactions that act on the same file? Not sure if that's
+		// strictly necessary. But we could have a second file that perhaps tracks
+		// two unrelated fields, like 5 integer arrays that are all intialized with
+		// the same integers, over 10kb or something. And then that file could have
+		// 3 independent sets of these things, so they all have clear dependence
+		// within but no dependence next to. Then we'll update all of them and the
+		// count as well in parallel transactions.
+		if r&(1<<3) == 0 {
+			cd, err := newCountdown(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wg sync.WaitGroup
+			for i := uint64(0); i < 50; i++ {
+				wg.Add(1)
+				go func(i uint64) {
+					defer wg.Done()
+					for j := uint64(1); j < 200; j++ {
+						err := cd.changeSplotch(i, j)
+						if err != nil {
+							t.Error(err)
+						}
+					}
+				}(i)
+			}
+			wg.Wait()
+			err = cd.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Open and close the cd to allow the consistency checks to run.
 		cd, err := newCountdown(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var wg sync.WaitGroup
-		for i := uint64(0); i < 50; i++ {
-			wg.Add(1)
-			go func(i uint64) {
-				defer wg.Done()
-				for j := uint64(1); j < 200; j++ {
-					err := cd.changeSplotch(i, j)
-					if err != nil {
-						t.Error(err)
-					}
-				}
-			}(i)
-		}
-		wg.Wait()
 		err = cd.Close()
 		if err != nil {
 			t.Fatal(err)
 		}
-	}
-
-	// Open and close the cd to allow the consistency checks to run.
-	cd, err := newCountdown(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = cd.Close()
-	if err != nil {
-		t.Fatal(err)
 	}
 }
