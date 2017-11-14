@@ -73,11 +73,11 @@ func (prodDependencies) create(path string) (file, error) {
 
 // faultyDiskDependency implements dependencies that simulate a faulty disk.
 type faultyDiskDependency struct {
-	// failDenominator determines how likely it is that a write will fail, defined
-	// as 1/failDenominator. Each write call increments failDenominator, and it
-	// starts at 2. This means that the more calls to WriteAt, the less likely
-	// the write is to fail. All calls will start automatically failing after
-	// 5000 writes.
+	// failDenominator determines how likely it is that a write will fail,
+	// defined as 1/failDenominator. Each write call increments
+	// failDenominator, and it starts at 2. This means that the more calls to
+	// WriteAt, the less likely the write is to fail. All calls will start
+	// automatically failing after writeLimit writes.
 	failDenominator int
 	writeLimit      int
 	failed          bool
