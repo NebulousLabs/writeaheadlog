@@ -21,7 +21,7 @@ type (
 		// offset is the file offset in the fake database
 		offset int64
 
-		// numbers
+		// numbers contains the set of numbers of the silo
 		numbers []uint32
 
 		// f is the file on which the silo is stored
@@ -30,7 +30,7 @@ type (
 		// i is the index of the number that needs to be incremented next
 		i uint32
 
-		// cs is the checksum of the silo
+		// cs is the checksum of the silo's numbers
 		cs checksum
 	}
 
@@ -38,15 +38,20 @@ type (
 		// offset is the in the file at which the number should be written
 		offset int64
 
-		// number is the number which is written at index
+		// number is the number which is written at offset
 		number uint32
 
 		// silo is the offset of the silo so we can apply the update to the right silo
 		silo int64
+
+		// cs is the checksum of the file that became obsolete after changing a
+		// number. It needs to be removed when the update is applied.
+		cs checksum
 	}
 )
 
-// newSilo creates a new silo of a certain length
+// newSilo creates a new silo of a certain length at s specific offset in the
+// file
 func newSilo(offset int64, length int, f *os.File) *silo {
 	if length == 0 {
 		panic("numbers shouldn't be empty")
@@ -61,25 +66,27 @@ func newSilo(offset int64, length int, f *os.File) *silo {
 
 // marshal marshals a siloUpdate
 func (su siloUpdate) marshal() []byte {
-	data := make([]byte, 24)
+	data := make([]byte, 20+checksumSize)
 	binary.LittleEndian.PutUint64(data[0:8], uint64(su.offset))
 	binary.LittleEndian.PutUint32(data[8:12], su.number)
-	binary.LittleEndian.PutUint64(data[12:], uint64(su.silo))
+	binary.LittleEndian.PutUint64(data[12:20], uint64(su.silo))
+	copy(data[20:], su.cs[:])
 	return data
 }
 
 // unmarshal unmarshals a siloUpdate from data
 func (su *siloUpdate) unmarshal(data []byte) {
-	if len(data) != 24 {
+	if len(data) != 20+checksumSize {
 		panic("data has wrong size")
 	}
 	su.offset = int64(binary.LittleEndian.Uint64(data[0:8]))
 	su.number = binary.LittleEndian.Uint32(data[8:12])
-	su.silo = int64(binary.LittleEndian.Uint64(data[12:]))
+	su.silo = int64(binary.LittleEndian.Uint64(data[12:20]))
+	copy(su.cs[:], data[20:])
 	return
 }
 
-// newUpdate create a WAL update using an index and a number
+// newUpdate create a WAL update from a siloUpdate
 func newUpdate(su siloUpdate) Update {
 	update := Update{
 		Name:         "This is my update. There are others like it but this one is mine",
@@ -89,12 +96,13 @@ func newUpdate(su siloUpdate) Update {
 	return update
 }
 
-// newSiloUpdate creates a new Silo update
+// newSiloUpdate creates a new Silo update for a number at a specific index
 func (s *silo) newSiloUpdate(index uint32, number uint32) siloUpdate {
 	return siloUpdate{
 		number: number,
 		offset: s.offset + int64(4*(index)),
 		silo:   s.offset,
+		cs:     s.cs,
 	}
 }
 
@@ -109,35 +117,38 @@ func (s *silo) updateChecksum() {
 	copy(s.cs[:], cs[:])
 }
 
-// applyUpdate applies an update to the silo
-func (su siloUpdate) applyUpdate(silo *silo) error {
+// applyUpdate applies an update to a silo on disk
+func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 	if silo == nil {
 		panic("silo shouldn't be nil")
 	}
+
+	// Write number
 	data := make([]byte, 4)
 	binary.LittleEndian.PutUint32(data[:], su.number)
 	_, err := silo.f.WriteAt(data[:], su.offset)
 	if err != nil {
 		return err
 	}
+
+	// Delete old data file if it still exists
+	err = os.Remove(filepath.Join(dataPath, hex.EncodeToString(su.cs[:])))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
 	return nil
 }
 
-// threadedSetupWrite simulate a setup by writing random data to disk
+// threadedSetupWrite simulates a setup by updating the checksum and writing
+// random data to a file which uses the checksum as a filename
 func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
 	// signal completion
 	defer close(done)
 
-	// delete old data file if it already exists
-	err := os.Remove(filepath.Join(dataPath, hex.EncodeToString(s.cs[:])))
-	if err != nil && !os.IsNotExist(err) {
-		done <- err
-		return
-	}
-
 	// write checksum
 	s.updateChecksum()
-	_, err = s.f.WriteAt(s.cs[:], s.offset+int64(len(s.numbers)*4))
+	_, err := s.f.WriteAt(s.cs[:], s.offset+int64(len(s.numbers)*4))
 	if err != nil {
 		done <- err
 		return
@@ -149,7 +160,7 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
 		done <- err
 		return
 	}
-	_, err = newFile.Write(fastrand.Bytes(pageSize))
+	_, err = newFile.Write(fastrand.Bytes(10 * pageSize))
 	if err != nil {
 		done <- err
 		return
@@ -160,8 +171,8 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
 	}
 
 	// sync changes
-	newFile.Sync()
-	s.f.Sync()
+	//newFile.Sync()
+	//s.f.Sync()
 }
 
 // threadedUpdate updates a silo 1000 times and leaves the last transaction unapplied.
@@ -180,15 +191,15 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 			} else {
 				s.numbers[s.i] = (s.numbers[s.i-1] + 1)
 			}
-			sus = append(sus, s.newSiloUpdate(s.i, s.numbers[s.i]))
+
+			// Create siloUpdate and WAL update and append them to the
+			// corresponding slice
+			su := s.newSiloUpdate(s.i, s.numbers[s.i])
+			sus = append(sus, su)
+			updates = append(updates, newUpdate(su))
 
 			// Increment the index. If that means we reach the end, set it to 0
 			s.i = (s.i + 1) % uint32(len(s.numbers))
-		}
-
-		// Convert silo updates to WAL updates
-		for _, su := range sus {
-			updates = append(updates, newUpdate(su))
 		}
 
 		// Start setup write
@@ -218,7 +229,7 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 
 		// Apply the updates
 		for _, su := range sus {
-			su.applyUpdate(s)
+			su.applyUpdate(s, dataPath)
 		}
 
 		// Signal release complete
@@ -254,14 +265,15 @@ func TestSilo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var numSilos = int64(100)
+	var numSilos = int64(250)
+	var numIncrease = 20
 	var siloOff int64
 	var siloOffsets []int64
 	var wg sync.WaitGroup
 	var silos = make(map[int64]*silo)
 	for i := 0; int64(i) < numSilos; i++ {
 		wg.Add(1)
-		silo := newSilo(siloOff, i+1, file)
+		silo := newSilo(siloOff, 1+i+numIncrease, file)
 		go silo.threadedUpdate(t, wal, testdir, &wg)
 
 		siloOffsets = append(siloOffsets, siloOff)
@@ -287,7 +299,25 @@ func TestSilo(t *testing.T) {
 	for _, update := range updates {
 		var su siloUpdate
 		su.unmarshal(update.Instructions)
-		su.applyUpdate(silos[su.silo])
+		su.applyUpdate(silos[su.silo], testdir)
+	}
+
+	// Remove unnecessary setup files
+	checksums := make(map[string]struct{})
+	for k := range silos {
+		checksums[hex.EncodeToString(silos[k].cs[:])] = struct{}{}
+	}
+	files, err := ioutil.ReadDir(testdir)
+	if err != nil {
+		t.Errorf("Failed to get list of files in testdir: %v", err)
+	}
+	for _, f := range files {
+		_, exists := checksums[f.Name()]
+		if len(f.Name()) == 32 && !exists {
+			if err := os.Remove(filepath.Join(testdir, f.Name())); err != nil && !os.IsNotExist(err) {
+				t.Errorf("Failed to remove setup file: %v", err)
+			}
+		}
 	}
 
 	// Check if the checksums match the data
@@ -313,7 +343,7 @@ func TestSilo(t *testing.T) {
 	}
 
 	// There should be numSilos + 2 files in the directory
-	files, err := ioutil.ReadDir(testdir)
+	files, err = ioutil.ReadDir(testdir)
 	if err != nil {
 		t.Error(err)
 	}
