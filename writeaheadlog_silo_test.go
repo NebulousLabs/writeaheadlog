@@ -246,6 +246,10 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 // TestSilo is an integration test that is supposed to test all the features of
 // the WAL in a single testcase. It uses 100 silos updating 1000 times each.
 func TestSilo(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
 	testdir := build.TempDir("wal", t.Name())
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
