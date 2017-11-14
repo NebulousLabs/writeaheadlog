@@ -25,13 +25,16 @@ type (
 		numbers []uint32
 
 		// f is the file on which the silo is stored
-		f *os.File
+		f file
 
 		// i is the index of the number that needs to be incremented next
 		i uint32
 
 		// cs is the checksum of the silo's numbers
 		cs checksum
+
+		// dep is the dependency that is used to handle file IO
+		dep dependency
 	}
 
 	siloUpdate struct {
@@ -52,7 +55,7 @@ type (
 
 // newSilo creates a new silo of a certain length at s specific offset in the
 // file
-func newSilo(offset int64, length int, f *os.File) *silo {
+func newSilo(offset int64, length int, f file) *silo {
 	if length == 0 {
 		panic("numbers shouldn't be empty")
 	}
@@ -132,7 +135,7 @@ func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 	}
 
 	// Delete old data file if it still exists
-	err = os.Remove(filepath.Join(dataPath, hex.EncodeToString(su.cs[:])))
+	err = dep.Remove(filepath.Join(dataPath, hex.EncodeToString(su.cs[:])))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -155,7 +158,7 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
 	}
 
 	// write new data file
-	newFile, err := os.Create(filepath.Join(dataPath, hex.EncodeToString(s.cs[:])))
+	newFile, err := s.dep.Create(filepath.Join(dataPath, hex.EncodeToString(s.cs[:])))
 	if err != nil {
 		done <- err
 		return
@@ -250,6 +253,7 @@ func TestSilo(t *testing.T) {
 		t.SkipNow()
 	}
 
+	dep := faultyDiskDependency{}
 	testdir := build.TempDir("wal", t.Name())
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
@@ -258,17 +262,18 @@ func TestSilo(t *testing.T) {
 	os.MkdirAll(testdir, 0777)
 
 	// Create fake database file
-	file, err := os.Create(dbPath)
+	file, err := dep.Create(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Create wal
-	updates, wal, err := newWal(walPath, dependencyUncleanShutdown{})
+	updates, wal, err := newWal(walPath, dep)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	// Do
 	var numSilos = int64(250)
 	var numIncrease = 20
 	var siloOff int64
@@ -318,7 +323,7 @@ func TestSilo(t *testing.T) {
 	for _, f := range files {
 		_, exists := checksums[f.Name()]
 		if len(f.Name()) == 32 && !exists {
-			if err := os.Remove(filepath.Join(testdir, f.Name())); err != nil && !os.IsNotExist(err) {
+			if err := dep.Remove(filepath.Join(testdir, f.Name())); err != nil && !os.IsNotExist(err) {
 				t.Errorf("Failed to remove setup file: %v", err)
 			}
 		}
