@@ -3,6 +3,7 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 	"sync/atomic"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -89,11 +90,18 @@ type Transaction struct {
 	initErr error
 }
 
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, pageSize)
+	},
+}
+
 // checksum calculates the checksum of a transaction excluding the checksum
 // field of each page
 func (t Transaction) checksum() (c checksum) {
 	h, _ := blake2b.New256(nil)
-	buf := make([]byte, pageSize)
+	buf := bufPool.Get().([]byte)
+	defer bufPool.Put(buf)
 	for page := t.firstPage; page != nil; page = page.nextPage {
 		b := page.appendTo(buf[:0])
 		h.Write(b[checksumSize:]) // exclude checksum
@@ -130,7 +138,11 @@ func (t *Transaction) commit(done chan error) {
 		done <- errors.New("Write failed on purpose")
 		return
 	}
-	if _, err := t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset)); err != nil {
+
+	buf := bufPool.Get().([]byte)
+	_, err := t.wal.logFile.WriteAt(t.firstPage.appendTo(buf[:0]), int64(t.firstPage.offset))
+	bufPool.Put(buf)
+	if err != nil {
 		done <- build.ExtendErr("Writing the first page failed", err)
 		return
 	}
@@ -271,7 +283,9 @@ func (t *Transaction) SignalUpdatesApplied() error {
 		// Disk failure causes the commit to fail
 		err = errors.New("Write failed on purpose")
 	} else {
-		_, err = t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset))
+		buf := bufPool.Get().([]byte)
+		_, err = t.wal.logFile.WriteAt(t.firstPage.appendTo(buf[:0]), int64(t.firstPage.offset))
+		bufPool.Put(buf)
 	}
 	if err != nil {
 		return build.ExtendErr("Couldn't write the page to file", err)
@@ -429,7 +443,8 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 
 // writeToFile writes all the pages of the transaction to disk
 func (t *Transaction) writeToFile() error {
-	buf := make([]byte, pageSize)
+	buf := bufPool.Get().([]byte)
+	defer bufPool.Put(buf)
 	for page := t.firstPage; page != nil; page = page.nextPage {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
