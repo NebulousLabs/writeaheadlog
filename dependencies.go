@@ -79,16 +79,19 @@ type faultyDiskDependency struct {
 	// the write is to fail. All calls will start automatically failing after
 	// 5000 writes.
 	failDenominator int
+	writeLimit      int
 	failed          bool
 	mu              *sync.Mutex
 }
 
 // newFaultyDiskDependency creates a dependency that can be used to simulate a
-// failing disk
-func newFaultyDiskDependency() faultyDiskDependency {
+// failing disk. writeLimit is the maximum number of writes the disk will
+// endure before failing
+func newFaultyDiskDependency(writeLimit int) faultyDiskDependency {
 	return faultyDiskDependency{
 		failDenominator: 3,
 		failed:          false,
+		writeLimit:      writeLimit,
 		mu:              new(sync.Mutex),
 	}
 }
@@ -129,7 +132,7 @@ func (f *faultyFile) Write(p []byte) (int, error) {
 
 	fail := fastrand.Intn(f.d.failDenominator) == 0
 	f.d.failDenominator++
-	if fail || f.d.failDenominator >= 5000 {
+	if fail || f.d.failDenominator >= f.d.writeLimit {
 		f.d.failed = true
 		return len(p), nil
 	}
@@ -148,7 +151,7 @@ func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 
 	fail := fastrand.Intn(f.d.failDenominator) == 0
 	f.d.failDenominator++
-	if fail || f.d.failDenominator >= 5000 {
+	if fail || f.d.failDenominator >= f.d.writeLimit {
 		f.d.failed = true
 		return len(p), nil
 	}
