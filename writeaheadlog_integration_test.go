@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-
-	"github.com/NebulousLabs/Sia/build"
 )
 
 const (
@@ -409,7 +407,7 @@ func TestWALIntegration(t *testing.T) {
 	// updates are being applied correctly.
 	for r := 0; r < 16; r++ {
 		// Create a folder to house everything we are working with.
-		dir := build.TempDir("wal", t.Name())
+		dir := tempDir(t.Name())
 		err := os.MkdirAll(dir, 0700)
 		if err != nil {
 			t.Fatal(err)
