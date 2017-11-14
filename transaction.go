@@ -310,7 +310,7 @@ func (t *Transaction) append(updates []Update, done chan error) {
 	}
 
 	// Write as much data to the last page as possible
-	lenDiff := maxPayloadSize - len(lastPage.payload)
+	lenDiff := MaxPayloadSize - len(lastPage.payload)
 	if len(data) <= lenDiff {
 		lastPage.payload = append(lastPage.payload, data...)
 		data = nil
