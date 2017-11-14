@@ -142,23 +142,31 @@ func (t *Transaction) commit(done chan error) {
 
 // marshalUpdates marshals the updates of a transaction
 func marshalUpdates(updates []Update) []byte {
-	buffer := new(bytes.Buffer)
-	for _, update := range updates {
-		// Marshal name
-		name := []byte(update.Name)
-		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(name)))
-		_, _ = buffer.Write(name)
-
-		// Marshal version
-		version := []byte(update.Version)
-		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(version)))
-		_, _ = buffer.Write(version)
-
-		// Append instructions
-		_ = binary.Write(buffer, binary.LittleEndian, uint64(len(update.Instructions)))
-		_, _ = buffer.Write(update.Instructions)
+	// preallocate buffer of appropriate size
+	var size int
+	for _, u := range updates {
+		size += 8 + len(u.Name)
+		size += 8 + len(u.Version)
+		size += 8 + len(u.Instructions)
 	}
-	return buffer.Bytes()
+	buf := make([]byte, size)
+
+	var n int
+	for _, u := range updates {
+		// u.Name
+		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Name)))
+		n += 8
+		n += copy(buf[n:], u.Name)
+		// u.Version
+		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Version)))
+		n += 8
+		n += copy(buf[n:], u.Version)
+		// u.Instructions
+		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Instructions)))
+		n += 8
+		n += copy(buf[n:], u.Instructions)
+	}
+	return buf
 }
 
 // unmarshalUpdates unmarshals the updates of a transaction
