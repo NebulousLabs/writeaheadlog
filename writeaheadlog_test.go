@@ -76,6 +76,7 @@ func newWALTester(name string, deps dependencies) (*walTester, error) {
 	}
 
 	if err := wal.RecoveryComplete(); err != nil {
+		wal.Close()
 		return nil, err
 	}
 
