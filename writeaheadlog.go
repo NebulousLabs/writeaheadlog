@@ -134,7 +134,7 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 		// Recover WAL and return updates
 		updates, err := newWal.recoverWal(data)
 		if err != nil {
-			newWal.logFile.Close()
+			err = build.ComposeErrors(err, newWal.logFile.Close())
 		}
 		return updates, newWal, err
 
