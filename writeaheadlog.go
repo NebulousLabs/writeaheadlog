@@ -328,6 +328,7 @@ func (w *WAL) managedReservePages(data []byte) []page {
 	w.availablePages = w.availablePages[:len(w.availablePages)-numPages]
 
 	// Set the fields of each page
+	buf := bytes.NewBuffer(data)
 	pages := make([]page, numPages)
 	for i := range pages {
 		// Set offset according to the index in reservedPages
@@ -343,12 +344,7 @@ func (w *WAL) managedReservePages(data []byte) []page {
 		pages[i].pageStatus = pageStatusOther
 
 		// Copy part of the update into the payload
-		payloadsize := MaxPayloadSize
-		if len(data[i*MaxPayloadSize:]) < payloadsize {
-			payloadsize = len(data[i*MaxPayloadSize:])
-		}
-		pages[i].payload = make([]byte, payloadsize)
-		copy(pages[i].payload, data[i*MaxPayloadSize:])
+		pages[i].payload = buf.Next(MaxPayloadSize)
 	}
 
 	return pages
