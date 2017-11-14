@@ -3,7 +3,6 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
-	"io"
 	"sync/atomic"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -171,47 +170,47 @@ func marshalUpdates(updates []Update) []byte {
 
 // unmarshalUpdates unmarshals the updates of a transaction
 func unmarshalUpdates(data []byte) ([]Update, error) {
-	buffer := bytes.NewBuffer(data)
-	updates := make([]Update, 0)
+	// helper function for reading length-prefixed data
+	buf := bytes.NewBuffer(data)
+	nextPrefix := func(buf *bytes.Buffer) ([]byte, bool) {
+		if buf.Len() < 8 {
+			// missing length prefix
+			return nil, false
+		}
+		l := int(binary.LittleEndian.Uint64(buf.Next(8)))
+		if l < 0 || l > buf.Len() {
+			// invalid length prefix
+			return nil, false
+		}
+		return buf.Next(l), true
+	}
 
+	var updates []Update
 	for {
-		update := Update{}
-
-		// Unmarshal name
-		var nameLength uint64
-		err1 := binary.Read(buffer, binary.LittleEndian, &nameLength)
-		if err1 == io.EOF {
-			// End of buffer reached
+		if buf.Len() == 0 {
 			break
 		}
 
-		name := make([]byte, nameLength)
-		_, err2 := buffer.Read(name)
-
-		// Unmarshal version
-		var versionLength uint64
-		err3 := binary.Read(buffer, binary.LittleEndian, &versionLength)
-
-		version := make([]byte, versionLength)
-		_, err4 := buffer.Read(version)
-
-		// Unmarshal instructions
-		var instructionsLength uint64
-		err5 := binary.Read(buffer, binary.LittleEndian, &instructionsLength)
-
-		instructions := make([]byte, instructionsLength)
-		_, err6 := buffer.Read(instructions)
-
-		// Check if any errors occured
-		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
-			return nil, errors.Compose(errors.New("Failed to unmarshal updates"), err1, err2, err3, err4, err5, err6)
+		name, ok := nextPrefix(buf)
+		if !ok {
+			return nil, errors.New("failed to unmarshal name")
 		}
 
-		update.Name = string(name)
-		update.Version = string(version)
-		update.Instructions = instructions
+		version, ok := nextPrefix(buf)
+		if !ok {
+			return nil, errors.New("failed to unmarshal version")
+		}
 
-		updates = append(updates, update)
+		instructions, ok := nextPrefix(buf)
+		if !ok {
+			return nil, errors.New("failed to unmarshal instructions")
+		}
+
+		updates = append(updates, Update{
+			Name:         string(name),
+			Version:      string(version),
+			Instructions: instructions,
+		})
 	}
 
 	return updates, nil
