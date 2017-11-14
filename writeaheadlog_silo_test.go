@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/fastrand"
@@ -33,8 +34,8 @@ type (
 		// cs is the checksum of the silo's numbers
 		cs checksum
 
-		// dep is the dependency that is used to handle file IO
-		dep dependency
+		// deps are the dependencies that is used to handle file IO
+		deps dependencies
 	}
 
 	siloUpdate struct {
@@ -55,7 +56,7 @@ type (
 
 // newSilo creates a new silo of a certain length at s specific offset in the
 // file
-func newSilo(offset int64, length int, f file) *silo {
+func newSilo(offset int64, length int, deps dependencies, f file) *silo {
 	if length == 0 {
 		panic("numbers shouldn't be empty")
 	}
@@ -64,6 +65,7 @@ func newSilo(offset int64, length int, f file) *silo {
 		offset:  offset,
 		numbers: make([]uint32, length, length),
 		f:       f,
+		deps:    deps,
 	}
 }
 
@@ -135,7 +137,7 @@ func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 	}
 
 	// Delete old data file if it still exists
-	err = dep.Remove(filepath.Join(dataPath, hex.EncodeToString(su.cs[:])))
+	err = silo.deps.remove(filepath.Join(dataPath, hex.EncodeToString(su.cs[:])))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -158,7 +160,7 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
 	}
 
 	// write new data file
-	newFile, err := s.dep.Create(filepath.Join(dataPath, hex.EncodeToString(s.cs[:])))
+	newFile, err := s.deps.create(filepath.Join(dataPath, hex.EncodeToString(s.cs[:])))
 	if err != nil {
 		done <- err
 		return
@@ -168,14 +170,14 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
 		done <- err
 		return
 	}
+	syncErr := newFile.Sync()
 	if err := newFile.Close(); err != nil {
 		done <- err
 		return
 	}
 
 	// sync changes
-	//newFile.Sync()
-	//s.f.Sync()
+	done <- build.ComposeErrors(syncErr, s.f.Sync())
 }
 
 // threadedUpdate updates a silo 1000 times and leaves the last transaction unapplied.
@@ -184,8 +186,8 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 
 	sus := make([]siloUpdate, 0, len(s.numbers))
 	updates := make([]Update, 0, len(s.numbers))
-	iterations := 100
-	for i := 0; i < iterations; i++ {
+
+	for {
 		// Change between 1 and len(s.numbers)
 		length := rand.Intn(len(s.numbers)) + 1
 		for j := 0; j < length; j++ {
@@ -212,32 +214,39 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 		// Create txn
 		txn, err := w.NewTransaction(updates)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 
-		// Wait for setup to finish
+		// Wait for setup to finish. If it wasn't successful there is no need
+		// to continue
 		if err := <-wait; err != nil {
-			t.Fatal(err)
+			return
 		}
 
 		// Signal setup complete
 		if err := <-txn.SignalSetupComplete(); err != nil {
-			t.Fatal(err)
-		}
-
-		// Corrupt the last iteration by not finishing it
-		if i == iterations-1 {
+			t.Error(err)
 			return
 		}
 
 		// Apply the updates
 		for _, su := range sus {
-			su.applyUpdate(s, dataPath)
+			if err := su.applyUpdate(s, dataPath); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+
+		// Sync the updates
+		if err := s.f.Sync(); err != nil {
+			return
 		}
 
 		// Signal release complete
 		if err := txn.SignalUpdatesApplied(); err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 
 		// Reset
@@ -253,7 +262,7 @@ func TestSilo(t *testing.T) {
 		t.SkipNow()
 	}
 
-	dep := faultyDiskDependency{}
+	deps := newFaultyDiskDependency(100000)
 	testdir := build.TempDir("wal", t.Name())
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
@@ -262,109 +271,140 @@ func TestSilo(t *testing.T) {
 	os.MkdirAll(testdir, 0777)
 
 	// Create fake database file
-	file, err := dep.Create(dbPath)
+	file, err := deps.create(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Create wal
-	updates, wal, err := newWal(walPath, dep)
+	// Create wal with disabled dependencies
+	deps.disable(true)
+	updates, wal, err := newWal(walPath, deps)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Do
+	// Declare some vars to configure the loop
 	var numSilos = int64(250)
 	var numIncrease = 20
-	var siloOff int64
-	var siloOffsets []int64
+	var maxCntr = 100
 	var wg sync.WaitGroup
-	var silos = make(map[int64]*silo)
-	for i := 0; int64(i) < numSilos; i++ {
-		wg.Add(1)
-		silo := newSilo(siloOff, 1+i+numIncrease, file)
-		go silo.threadedUpdate(t, wal, testdir, &wg)
+	var completed = 0
 
-		siloOffsets = append(siloOffsets, siloOff)
-		silos[siloOff] = silo
-		siloOff += int64(len(silo.numbers)*4) + checksumSize
-	}
+	// Write silos, pull the plug and verify repeatedly
+	for cntr := 0; cntr < maxCntr; cntr++ {
+		// Reset and enable dependencies
+		deps.reset()
 
-	// Wait for threads to finish
-	wg.Wait()
+		var siloOff int64
+		var siloOffsets []int64
+		var silos = make(map[int64]*silo)
+		for i := 0; int64(i) < numSilos; i++ {
+			wg.Add(1)
+			silo := newSilo(siloOff, 1+i+numIncrease, deps, file)
+			go silo.threadedUpdate(t, wal, testdir, &wg)
 
-	// Close wal
-	if err := wal.logFile.Close(); err != nil {
-		t.Error(err)
-	}
+			siloOffsets = append(siloOffsets, siloOff)
+			silos[siloOff] = silo
+			siloOff += int64(len(silo.numbers)*4) + checksumSize
+		}
 
-	// Reload wal
-	updates, wal, err = New(walPath)
-	if err != nil {
-		t.Errorf("Failed to load wal: %v", err)
-	}
+		// Let the loop run for 5 seconds before activating the dependency
+		<-time.After(time.Second * 5)
+		deps.disable(false)
 
-	// Unmarshal updates and apply them
-	for _, update := range updates {
-		var su siloUpdate
-		su.unmarshal(update.Instructions)
-		su.applyUpdate(silos[su.silo], testdir)
-	}
+		// Wait for threads to finish
+		wg.Wait()
 
-	// Remove unnecessary setup files
-	checksums := make(map[string]struct{})
-	for k := range silos {
-		checksums[hex.EncodeToString(silos[k].cs[:])] = struct{}{}
-	}
-	files, err := ioutil.ReadDir(testdir)
-	if err != nil {
-		t.Errorf("Failed to get list of files in testdir: %v", err)
-	}
-	for _, f := range files {
-		_, exists := checksums[f.Name()]
-		if len(f.Name()) == 32 && !exists {
-			if err := dep.Remove(filepath.Join(testdir, f.Name())); err != nil && !os.IsNotExist(err) {
-				t.Errorf("Failed to remove setup file: %v", err)
+		// Close wal
+		if err := wal.logFile.Close(); err != nil {
+			t.Error(err)
+		}
+
+		// Reload wal. We assume that the disk is fixed now
+		deps.disable(true)
+		updates, wal, err = newWal(walPath, deps)
+		if err != nil {
+			t.Fatalf("Failed to reload WAL: %v", err)
+		}
+
+		// Check amount of unfinished updates
+		if len(updates) == 0 {
+			// If there are no updates, this means that no thread failed
+			// between SignalSetupComplete and SignalUpdatesApplied
+			continue
+		}
+
+		// Unmarshal updates and apply them
+		for _, update := range updates {
+			var su siloUpdate
+			su.unmarshal(update.Instructions)
+			if err := su.applyUpdate(silos[su.silo], testdir); err != nil {
+				t.Fatalf("Failed to apply update: %v", err)
 			}
 		}
-	}
 
-	// Check if the checksums match the data
-	numbers := make([]byte, numSilos*int64(numIncrease)*4)
-	var cs checksum
-	for _, silo := range silos {
-		// Adjust the size of numbers
-		numbers = numbers[:4*len(silo.numbers)]
-
-		// Read numbers and checksum
-		if _, err := silo.f.ReadAt(numbers, silo.offset); err != nil {
-			t.Errorf("Failed to read numbers of silo %v", err)
-		}
-		if _, err := silo.f.ReadAt(cs[:], silo.offset+int64(4*len(silo.numbers))); err != nil {
-			t.Errorf("Failed to read checksum of silo %v", err)
+		// Sync the applied updates
+		if err := file.Sync(); err != nil {
+			t.Fatalf("Failed to sync database: %v", err)
 		}
 
-		// The checksum should match
-		c := blake2b.Sum256(numbers)
-		if bytes.Compare(c[:checksumSize], cs[:]) != 0 {
-			t.Errorf("Checksums don't match \n %v\n %v", cs, c[:checksumSize])
+		// Remove unnecessary setup files
+		checksums := make(map[string]struct{})
+		for k := range silos {
+			checksums[hex.EncodeToString(silos[k].cs[:])] = struct{}{}
 		}
-	}
+		files, err := ioutil.ReadDir(testdir)
+		if err != nil {
+			t.Fatalf("Failed to get list of files in testdir: %v", err)
+		}
+		for _, f := range files {
+			_, exists := checksums[f.Name()]
+			if len(f.Name()) == 32 && !exists {
+				if err := deps.remove(filepath.Join(testdir, f.Name())); err != nil && !os.IsNotExist(err) {
+					t.Fatalf("Failed to remove setup file: %v", err)
+				}
+			}
+		}
 
-	// There should be numSilos + 2 files in the directory
-	files, err = ioutil.ReadDir(testdir)
-	if err != nil {
-		t.Error(err)
-	}
-	if int64(len(files)) != numSilos+2 {
-		t.Errorf("Wrong number of files. Was %v but should be %v", len(files), numSilos+2)
-	}
+		// Check if the checksums match the data
+		numbers := make([]byte, numSilos*int64(numIncrease)*4)
+		var cs checksum
+		for _, silo := range silos {
+			// Adjust the size of numbers
+			numbers = numbers[:4*len(silo.numbers)]
 
-	// Signal a completed recovery and close the wal
-	if err := wal.RecoveryComplete(); err != nil {
-		t.Errorf("Failed to signal completed recovery: %v", err)
+			// Read numbers and checksum
+			if _, err := silo.f.ReadAt(numbers, silo.offset); err != nil {
+				t.Fatalf("Failed to read numbers of silo %v", err)
+			}
+			if _, err := silo.f.ReadAt(cs[:], silo.offset+int64(4*len(silo.numbers))); err != nil {
+				t.Fatalf("Failed to read checksum of silo %v", err)
+			}
+
+			// The checksum should match
+			c := blake2b.Sum256(numbers)
+			if bytes.Compare(c[:checksumSize], cs[:]) != 0 {
+				t.Fatalf("Checksums don't match \n %v\n %v", cs, c[:checksumSize])
+			}
+		}
+
+		// There should be numSilos + 2 files in the directory
+		files, err = ioutil.ReadDir(testdir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if int64(len(files)) != numSilos+2 {
+			t.Fatalf("Wrong number of files. Was %v but should be %v", len(files), numSilos+2)
+		}
+
+		if err := wal.RecoveryComplete(); err != nil {
+			t.Fatalf("Failed to signal completed recovery: %v", err)
+		}
+
+		if err := wal.Close(); err != nil {
+			t.Fatalf("Failed to close WAL: %v", err)
+		}
+		completed++
 	}
-	if err := wal.Close(); err != nil {
-		t.Errorf("Failed to close WAL: %v", err)
-	}
+	t.Logf("%v of %v iterations completed", completed, maxCntr)
 }
