@@ -151,6 +151,9 @@ func TestCommitFailed(t *testing.T) {
 // file randomly fails writes. When the file failes a write, it returns an
 // error on sync.
 func TestWALInconsistentSync(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
 	var wt *walTester
 	// initialize a new wal using the faulty disk dependency. Retry since the
 	// faulty disk can cause initialization to fail
