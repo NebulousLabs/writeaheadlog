@@ -2,6 +2,7 @@ package writeaheadlog
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/NebulousLabs/Sia/build"
-	"github.com/NebulousLabs/errors"
 )
 
 const (
@@ -299,7 +299,7 @@ func (ca *countdownArray) applyUpdates(updates []Update) error {
 
 // Close will cleanly shut down the countdownArray.
 func (ca *countdownArray) Close() error {
-	return errors.Compose(ca.wal.Close(), ca.file.Close())
+	return composeErrors(ca.wal.Close(), ca.file.Close())
 }
 
 // newCountdown will initialze a countdown using the wal.
