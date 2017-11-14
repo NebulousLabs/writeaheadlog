@@ -181,7 +181,7 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 
 	sus := make([]siloUpdate, 0, len(s.numbers))
 	updates := make([]Update, 0, len(s.numbers))
-	iterations := 1000
+	iterations := 100
 	for i := 0; i < iterations; i++ {
 		// Change between 1 and len(s.numbers)
 		length := rand.Intn(len(s.numbers)) + 1
@@ -278,7 +278,7 @@ func TestSilo(t *testing.T) {
 
 		siloOffsets = append(siloOffsets, siloOff)
 		silos[siloOff] = silo
-		siloOff += int64((i+1)*4) + checksumSize
+		siloOff += int64(len(silo.numbers)*4) + checksumSize
 	}
 
 	// Wait for threads to finish
@@ -321,7 +321,7 @@ func TestSilo(t *testing.T) {
 	}
 
 	// Check if the checksums match the data
-	numbers := make([]byte, numSilos*4)
+	numbers := make([]byte, numSilos*int64(numIncrease)*4)
 	var cs checksum
 	for _, silo := range silos {
 		// Adjust the size of numbers
