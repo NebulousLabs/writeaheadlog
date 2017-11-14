@@ -365,7 +365,7 @@ func unmarshalPage(p *page, b []byte) (nextPage uint64, err error) {
 	// Read payloadSize
 	var payloadSize uint64
 	err5 := binary.Read(buffer, binary.LittleEndian, &payloadSize)
-	if payloadSize == 0 || payloadSize > maxPayloadSize {
+	if payloadSize == 0 || payloadSize > MaxPayloadSize {
 		err = errors.New("invalid page payload size")
 		return
 	}
