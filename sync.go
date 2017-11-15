@@ -13,7 +13,6 @@ func (w *WAL) threadedSync() {
 		w.syncCond.L.Lock()
 		if w.syncCount == 0 {
 			// nothing to sync
-			w.syncing = false
 			w.syncCond.L.Unlock()
 			return
 		}
@@ -42,9 +41,11 @@ func (w *WAL) fSync() {
 	w.syncCond.L.Lock()
 	defer w.syncCond.L.Unlock()
 
-	// If there is currently no instance of the syncing thread create one
-	if !w.syncing {
-		w.syncing = true
+	// Increment the number of syncing threads
+	w.syncCount++
+
+	// If we are the only syncing thread, spawn the threadedSync loop
+	if w.syncCount == 1 {
 		go w.threadedSync()
 	}
 

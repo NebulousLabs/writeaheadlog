@@ -55,9 +55,6 @@ type WAL struct {
 	// stopChan is a channel that is used to signal a shutdown
 	stopChan chan struct{}
 
-	// syncing indicates if the syncing thread is currently being executed
-	syncing bool
-
 	// recoveryComplete indicates if the caller signalled that the recovery is complete
 	recoveryComplete bool
 
