@@ -192,6 +192,10 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 	}
 
 	if recoveryState == recoveryStateClean {
+		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
+			return nil, err
+		}
+		w.recoveryComplete = true
 		return []Update{}, nil
 	}
 
@@ -201,12 +205,10 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 		if err := w.wipeWAL(); err != nil {
 			return nil, err
 		}
-		if err := w.logFile.Sync(); err != nil {
-			return nil, err
-		}
 		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
 			return nil, err
 		}
+		w.recoveryComplete = true
 		return []Update{}, w.logFile.Sync()
 	}
 

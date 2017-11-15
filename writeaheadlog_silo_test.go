@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -31,9 +32,6 @@ type (
 
 		// i is the index of the number that needs to be incremented next
 		i uint32
-
-		// cs is the checksum of the silo's numbers
-		cs checksum
 
 		// deps are the dependencies that is used to handle file IO
 		deps dependencies
@@ -103,7 +101,7 @@ func (su *siloUpdate) unmarshal(data []byte) {
 }
 
 // newUpdate create a WAL update from a siloUpdate
-func newUpdate(su siloUpdate) Update {
+func newUpdate(su *siloUpdate) Update {
 	update := Update{
 		Name:         "This is my update. There are others like it but this one is mine",
 		Version:      "v0.9.8.7.6.5.4.3.2.1.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z",
@@ -113,13 +111,12 @@ func newUpdate(su siloUpdate) Update {
 }
 
 // newSiloUpdate creates a new Silo update for a number at a specific index
-func (s *silo) newSiloUpdate(index uint32, number uint32, ocs checksum, ncs checksum) siloUpdate {
-	return siloUpdate{
+func (s *silo) newSiloUpdate(index uint32, number uint32, ocs checksum) *siloUpdate {
+	return &siloUpdate{
 		number: number,
 		offset: s.offset + int64(4*(index)),
 		silo:   s.offset,
 		ocs:    ocs,
-		ncs:    ncs,
 		ncso:   s.offset + int64(len(s.numbers)*4),
 	}
 }
@@ -160,18 +157,24 @@ func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-
 	return nil
+}
+
+// init calculates the checksum of the silo and writes it to disk
+func (s *silo) init() error {
+	cs := s.checksum()
+	_, err := s.f.WriteAt(cs[:], s.offset+int64(len(s.numbers)*4))
+	return err
 }
 
 // threadedSetupWrite simulates a setup by updating the checksum and writing
 // random data to a file which uses the checksum as a filename
-func (s *silo) threadedSetupWrite(done chan error, dataPath string) {
+func (s *silo) threadedSetupWrite(done chan error, dataPath string, ncs checksum) {
 	// signal completion
 	defer close(done)
 
 	// write new data file
-	newFile, err := s.deps.create(filepath.Join(dataPath, hex.EncodeToString(s.cs[:])))
+	newFile, err := s.deps.create(filepath.Join(dataPath, hex.EncodeToString(ncs[:])))
 	if err != nil {
 		done <- err
 		return
@@ -196,33 +199,38 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 	defer wg.Done()
 
 	// Allocate some memory for the updates
-	sus := make([]siloUpdate, 0, len(s.numbers))
-	updates := make([]Update, 0, len(s.numbers))
+	sus := make([]*siloUpdate, 0, len(s.numbers))
 	for {
 		// Change between 1 and len(s.numbers)
 		length := rand.Intn(len(s.numbers)) + 1
+		var ocs = s.checksum()
+		var ncs checksum
 		for j := 0; j < length; j++ {
-			ocs := s.checksum()
 			if s.i == 0 {
 				s.numbers[s.i] = (s.numbers[len(s.numbers)-1] + 1)
 			} else {
 				s.numbers[s.i] = (s.numbers[s.i-1] + 1)
 			}
-			ncs := s.checksum()
+			ncs = s.checksum()
 
-			// Create siloUpdate and WAL update and append them to the
-			// corresponding slice
-			su := s.newSiloUpdate(s.i, s.numbers[s.i], ocs, ncs)
+			// Create siloUpdate
+			su := s.newSiloUpdate(s.i, s.numbers[s.i], ocs)
 			sus = append(sus, su)
-			updates = append(updates, newUpdate(su))
 
 			// Increment the index. If that means we reach the end, set it to 0
 			s.i = (s.i + 1) % uint32(len(s.numbers))
 		}
 
+		// Set the siloUpdates checksum and create the corresponding update
+		updates := make([]Update, 0, len(s.numbers))
+		for _, su := range sus {
+			copy(su.ncs[:], ncs[:])
+			updates = append(updates, newUpdate(su))
+		}
+
 		// Start setup write
 		wait := make(chan error)
-		go s.threadedSetupWrite(wait, dataPath)
+		go s.threadedSetupWrite(wait, dataPath, ncs)
 
 		// Create txn
 		txn, err := w.NewTransaction(updates)
@@ -283,12 +291,16 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 	}()
 
 	// Unmarshal updates and apply them
+	var checksums = make(map[string]struct{})
 	for _, update := range updates {
 		var su siloUpdate
 		su.unmarshal(update.Instructions)
 		if err := su.applyUpdate(silos[su.silo], testdir); err != nil {
 			return build.ExtendErr("Failed to apply update", err)
 		}
+		// Remember new checksums to be able to remove unnecessary setup files
+		// later
+		checksums[hex.EncodeToString(su.ncs[:])] = struct{}{}
 	}
 
 	// Sync the applied updates
@@ -297,10 +309,6 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 	}
 
 	// Remove unnecessary setup files
-	checksums := make(map[string]struct{})
-	for k := range silos {
-		checksums[hex.EncodeToString(silos[k].cs[:])] = struct{}{}
-	}
 	files, err := ioutil.ReadDir(testdir)
 	if err != nil {
 		return build.ExtendErr("Failed to get list of files in testdir", err)
@@ -309,6 +317,7 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 		_, exists := checksums[f.Name()]
 		if len(f.Name()) == 32 && !exists {
 			if err := deps.remove(filepath.Join(testdir, f.Name())); err != nil && !os.IsNotExist(err) {
+
 				return build.ExtendErr("Failed to remove setup file", err)
 			}
 		}
@@ -354,7 +363,7 @@ func TestSilo(t *testing.T) {
 		t.SkipNow()
 	}
 
-	deps := newFaultyDiskDependency(100000)
+	deps := newFaultyDiskDependency(5000)
 	testdir := build.TempDir("wal", t.Name())
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
@@ -365,47 +374,63 @@ func TestSilo(t *testing.T) {
 	// Disable dependencies for the initial files
 	deps.disable(true)
 
-	// Create fake database file
-	file, err := deps.create(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create wal with disabled dependencies
-	_, wal, err := newWal(walPath, deps)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	// Declare some vars to configure the loop
 	var numSilos = int64(250)
 	var numIncrease = 20
 	var maxCntr = 100
+	var numRetries = 100
 	var wg sync.WaitGroup
-	var completed = 0
-
-	// Activate the dependencies
-	deps.disable(false)
+	var counters = make([]int, maxCntr, maxCntr)
 
 	// Write silos, pull the plug and verify repeatedly
 	for cntr := 0; cntr < maxCntr; cntr++ {
-		// Reset dependencies
+		log.Print(cntr + 1)
+		deps.disable(true)
+
+		// Create fake database file
+		os.Remove(dbPath)
+		file, err := deps.create(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Create wal with disabled dependencies
+		updates, wal, err := newWal(walPath, deps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(updates) > 0 || wal.recoveryComplete == false {
+			t.Fatalf("len(updates) was %v and recoveryComplete was %v",
+				len(updates), wal.recoveryComplete)
+		}
+
+		// Reset dependencies and increase the write limit to allow for higher
+		// success rate
 		deps.reset()
 
 		var siloOff int64
 		var siloOffsets []int64
 		var silos = make(map[int64]*silo)
+
+		// Start the threaded update after creating and initializing the silos
 		for i := 0; int64(i) < numSilos; i++ {
 			wg.Add(1)
 			silo := newSilo(siloOff, 1+i*numIncrease, deps, file)
-			go silo.threadedUpdate(t, wal, testdir, &wg)
+			if err := silo.init(); err != nil {
+				t.Fatalf("Failed to init silo: %v", err)
+			}
 
+			go silo.threadedUpdate(t, wal, testdir, &wg)
 			siloOffsets = append(siloOffsets, siloOff)
 			silos[siloOff] = silo
 			siloOff += int64(len(silo.numbers)*4) + checksumSize
 		}
 
-		// Wait for threads to finish
+		// Corrupt the disk
+		*deps.writeLimit = 10000000
+		deps.disable(false)
+
+		// Wait for all the threads to fail
 		wg.Wait()
 
 		// Close wal
@@ -414,24 +439,33 @@ func TestSilo(t *testing.T) {
 		}
 
 		// Repeatedly try to recover WAL
-		err := build.Retry(100, time.Millisecond, func() error {
-			deps.reset()
+		deps.reset()
+		err = build.Retry(numRetries, time.Millisecond, func() error {
+			counters[cntr]++
+			log.Print(counters[cntr])
+			// Reset deps if the failDenominator is already above the
+			// writeLimitl. Otherwise we only need to reset deps.failed. This
+			// reduces the chance of disk corruption after every iteration.
+			deps.mu.Lock()
+			*deps.failed = false
+			if *deps.failDenominator > *deps.writeLimit {
+				deps.mu.Unlock()
+				deps.reset()
+			} else {
+				deps.mu.Unlock()
+			}
+
+			// Try to recover WAL
 			return recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
 		})
 		if err != nil {
 			t.Errorf("WAL never recovered: %v", err)
 		}
-
-		// There should be numSilos + 2 files in the directory
-		files, err := ioutil.ReadDir(testdir)
-		if err != nil {
-			t.Error(err)
-		}
-		if int64(len(files)) != numSilos+2 {
-			t.Errorf("Wrong number of files. Was %v but should be %v", len(files), numSilos+2)
-		}
-		completed++
 	}
-
-	t.Logf("%v of %v iterations completed", completed, maxCntr)
+	avgCounter := 0
+	for _, n := range counters {
+		avgCounter += n
+	}
+	avgCounter /= len(counters)
+	t.Logf("Average number of retries: %v", avgCounter)
 }

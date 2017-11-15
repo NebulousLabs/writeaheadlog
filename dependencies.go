@@ -93,7 +93,7 @@ type faultyDiskDependency struct {
 // failing disk. writeLimit is the maximum number of writes the disk will
 // endure before failing
 func newFaultyDiskDependency(writeLimit int) faultyDiskDependency {
-	var denominator = 3
+	var denominator = 10
 	var failed = false
 	var disabled = false
 	return faultyDiskDependency{
@@ -131,7 +131,7 @@ func (d faultyDiskDependency) remove(path string) error {
 
 	if !*d.disabled {
 		fail := fastrand.Intn(*d.failDenominator) == 0
-		*d.failDenominator++
+		*d.failDenominator += 10
 		if fail || *d.failDenominator >= *d.writeLimit {
 			*d.failed = true
 			return nil
@@ -155,7 +155,7 @@ func (f *faultyFile) Write(p []byte) (int, error) {
 
 	if !*f.d.disabled {
 		fail := fastrand.Intn(*f.d.failDenominator) == 0
-		*f.d.failDenominator++
+		*f.d.failDenominator += 10
 		if fail || *f.d.failDenominator >= *f.d.writeLimit {
 			*f.d.failed = true
 			return len(p), nil
@@ -176,7 +176,7 @@ func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 
 	if !*f.d.disabled {
 		fail := fastrand.Intn(*f.d.failDenominator) == 0
-		*f.d.failDenominator++
+		*f.d.failDenominator += 10
 		if fail || *f.d.failDenominator >= *f.d.writeLimit {
 			*f.d.failed = true
 			return len(p), nil
@@ -205,7 +205,7 @@ func (d *faultyDiskDependency) newFaultyFile(f *os.File) *faultyFile {
 // reset resets the failDenominator and the failed flag of the dependency
 func (d *faultyDiskDependency) reset() {
 	d.mu.Lock()
-	*d.failDenominator = 3
+	*d.failDenominator = 10
 	*d.failed = false
 	d.mu.Unlock()
 }
