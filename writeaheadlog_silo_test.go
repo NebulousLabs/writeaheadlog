@@ -292,6 +292,7 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 
 	// Unmarshal updates and apply them
 	var checksums = make(map[string]struct{})
+	log.Print("updates ", len(updates))
 	for _, update := range updates {
 		var su siloUpdate
 		su.unmarshal(update.Instructions)
@@ -375,10 +376,10 @@ func TestSilo(t *testing.T) {
 	deps.disable(true)
 
 	// Declare some vars to configure the loop
-	var numSilos = int64(50)
-	var numIncrease = 100
-	var maxCntr = 100
-	var numRetries = 100
+	var numSilos = int64(250)
+	var numIncrease = 20
+	var maxCntr = 10
+	var numRetries = 10
 	var wg sync.WaitGroup
 	var counters = make([]int, maxCntr, maxCntr)
 
@@ -386,7 +387,7 @@ func TestSilo(t *testing.T) {
 	for cntr := 0; cntr < maxCntr; cntr++ {
 		deps.disable(true)
 
-		// Create fake database file
+		// Create new fake database file
 		os.Remove(dbPath)
 		file, err := deps.create(dbPath)
 		if err != nil {
@@ -440,6 +441,7 @@ func TestSilo(t *testing.T) {
 		// Repeatedly try to recover WAL
 		deps.reset()
 		*deps.writeLimit = 10000000
+		deps.disable(true)
 		err = build.Retry(numRetries, time.Millisecond, func() error {
 			counters[cntr]++
 			log.Print(counters[cntr])
@@ -458,8 +460,9 @@ func TestSilo(t *testing.T) {
 			// Try to recover WAL
 			return recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
 		})
+		deps.disable(false)
 		if err != nil {
-			t.Errorf("WAL never recovered: %v", err)
+			t.Fatalf("WAL never recovered: %v", err)
 		}
 	}
 	avgCounter := 0
