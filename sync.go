@@ -1,9 +1,5 @@
 package writeaheadlog
 
-import (
-	"github.com/NebulousLabs/Sia/build"
-)
-
 // threadedSync syncs the WAL in regular intervals
 func (w *WAL) threadedSync() {
 	for {
@@ -23,12 +19,11 @@ func (w *WAL) threadedSync() {
 		// Unlock the syncCond.L for other threads to queue up
 		w.syncCond.L.Unlock()
 
-		// If the sync fails we should abort to avoid more corruption
-		if err := w.logFile.Sync(); err != nil {
-			if !w.deps.disrupt("FaultyDisk") {
-				build.Critical(build.ExtendErr("Failed to sync wal. Aborting to avoid corruption", err))
-			}
-		}
+		// Sync the file and set the error
+		err := w.logFile.Sync()
+		w.syncCond.L.Lock()
+		w.syncErr = err
+		w.syncCond.L.Unlock()
 
 		// Signal waiting threads that they can continue execution
 		w.syncCond.Broadcast()
@@ -36,7 +31,7 @@ func (w *WAL) threadedSync() {
 }
 
 // fSync syncs the WAL's underlying file.
-func (w *WAL) fSync() {
+func (w *WAL) fSync() error {
 	// We need to hold the lock of the condition before using it
 	w.syncCond.L.Lock()
 	defer w.syncCond.L.Unlock()
@@ -49,9 +44,9 @@ func (w *WAL) fSync() {
 		go w.threadedSync()
 	}
 
-	// Signal the syncing thread that we require syncing the wal
-	w.syncCount++
-
-	// Wait for the syncing thread to call fsync
+	// Wait for threadedSync to call Sync
 	w.syncCond.Wait()
+
+	// Return the Sync error
+	return w.syncErr
 }

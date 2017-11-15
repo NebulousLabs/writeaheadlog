@@ -55,6 +55,9 @@ type WAL struct {
 	// stopChan is a channel that is used to signal a shutdown
 	stopChan chan struct{}
 
+	// syncErr is the error returned by the most recent fsync call
+	syncErr error
+
 	// recoveryComplete indicates if the caller signalled that the recovery is complete
 	recoveryComplete bool
 
