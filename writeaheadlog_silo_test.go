@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -292,7 +291,6 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 
 	// Unmarshal updates and apply them
 	var checksums = make(map[string]struct{})
-	log.Print("updates ", len(updates))
 	for _, update := range updates {
 		var su siloUpdate
 		su.unmarshal(update.Instructions)
@@ -378,8 +376,8 @@ func TestSilo(t *testing.T) {
 	// Declare some vars to configure the loop
 	var numSilos = int64(250)
 	var numIncrease = 20
-	var maxCntr = 10
-	var numRetries = 10
+	var maxCntr = 20
+	var numRetries = 1000
 	var wg sync.WaitGroup
 	var counters = make([]int, maxCntr, maxCntr)
 
@@ -444,7 +442,6 @@ func TestSilo(t *testing.T) {
 		deps.disable(true)
 		err = build.Retry(numRetries, time.Millisecond, func() error {
 			counters[cntr]++
-			log.Print(counters[cntr])
 			// Reset deps if the failDenominator is already above the
 			// writeLimitl. Otherwise we only need to reset deps.failed. This
 			// reduces the chance of disk corruption after every iteration.
