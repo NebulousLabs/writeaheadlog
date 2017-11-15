@@ -363,7 +363,7 @@ func TestSilo(t *testing.T) {
 		t.SkipNow()
 	}
 
-	deps := newFaultyDiskDependency(5000)
+	deps := newFaultyDiskDependency(1000)
 	testdir := build.TempDir("wal", t.Name())
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
@@ -375,8 +375,8 @@ func TestSilo(t *testing.T) {
 	deps.disable(true)
 
 	// Declare some vars to configure the loop
-	var numSilos = int64(250)
-	var numIncrease = 20
+	var numSilos = int64(50)
+	var numIncrease = 100
 	var maxCntr = 100
 	var numRetries = 100
 	var wg sync.WaitGroup
@@ -384,7 +384,6 @@ func TestSilo(t *testing.T) {
 
 	// Write silos, pull the plug and verify repeatedly
 	for cntr := 0; cntr < maxCntr; cntr++ {
-		log.Print(cntr + 1)
 		deps.disable(true)
 
 		// Create fake database file
@@ -407,6 +406,7 @@ func TestSilo(t *testing.T) {
 		// Reset dependencies and increase the write limit to allow for higher
 		// success rate
 		deps.reset()
+		*deps.writeLimit = 5000
 
 		var siloOff int64
 		var siloOffsets []int64
@@ -427,7 +427,6 @@ func TestSilo(t *testing.T) {
 		}
 
 		// Corrupt the disk
-		*deps.writeLimit = 10000000
 		deps.disable(false)
 
 		// Wait for all the threads to fail
@@ -440,6 +439,7 @@ func TestSilo(t *testing.T) {
 
 		// Repeatedly try to recover WAL
 		deps.reset()
+		*deps.writeLimit = 10000000
 		err = build.Retry(numRetries, time.Millisecond, func() error {
 			counters[cntr]++
 			log.Print(counters[cntr])
