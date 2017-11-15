@@ -20,6 +20,16 @@ import (
 // ACID transactions to disk without sacrificing speed or latency more than
 // fundamentally required.
 type WAL struct {
+	// atomicNextTxnNum is used to give every transaction a unique transaction
+	// number. The transaction will then wait until atomicTransactionCounter allows
+	// the transaction to be committed. This ensures that transactions are committed
+	// in the correct order.
+	atomicNextTxnNum uint64
+
+	// atomicUnfinishedTxns counts how many transactions were created but not
+	// released yet. This counter needs to be 0 for the wal to exit cleanly.
+	atomicUnfinishedTxns int64
+
 	// availablePages lists the offset of file pages which currently have completed or
 	// voided updates in them. The pages are in no particular order.
 	availablePages []uint64
@@ -29,12 +39,6 @@ type WAL struct {
 	// for a new transaction, then the file is extended, new pages are added,
 	// and the availablePages array is updated to include the extended pages.
 	filePageCount int
-
-	// atomicNextTxnNum is used to give every transaction a unique transaction
-	// number. The transaction will then wait until atomicTransactionCounter allows
-	// the transaction to be committed. This ensures that transactions are committed
-	// in the correct order.
-	atomicNextTxnNum uint64
 
 	// logFile contains all of the persistent data associated with the log.
 	logFile file
@@ -69,10 +73,6 @@ type WAL struct {
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
 	deps dependencies
-
-	// atomicUnfinishedTxns counts how many transactions were created but not
-	// released yet. This counter needs to be 0 for the wal to exit cleanly.
-	atomicUnfinishedTxns int64
 }
 
 type (
