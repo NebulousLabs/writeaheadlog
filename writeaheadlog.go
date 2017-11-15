@@ -48,10 +48,6 @@ type WAL struct {
 	// syncCond is used to schedule the calls to fsync
 	syncCond *sync.Cond
 
-	// syncMu is the lock contained in syncCond and must be held before
-	// changing the state of the syncCond
-	syncMu sync.Mutex
-
 	// syncCount is a counter that indicates how many transactions are
 	// currently waiting for a fsync
 	syncCount uint64
@@ -117,11 +113,11 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	newWal := &WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),
+		syncCond: sync.NewCond(new(sync.Mutex)),
 		path:     path,
 	}
 
 	// Create a condition for the wal
-	newWal.syncCond = sync.NewCond(&newWal.syncMu)
 	// Try opening the WAL file.
 	data, err := deps.readFile(path)
 	if err == nil {

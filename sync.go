@@ -10,19 +10,19 @@ func (w *WAL) threadedSync() {
 		// Holding the lock of the condition is not required before calling
 		// Signal or Broadcast, but we also want to check the syncCount to
 		// avoid unnecessary syncs.
-		w.syncMu.Lock()
+		w.syncCond.L.Lock()
 		if w.syncCount == 0 {
 			// nothing to sync
 			w.syncing = false
-			w.syncMu.Unlock()
+			w.syncCond.L.Unlock()
 			return
 		}
 
 		// Reset syncCount
 		w.syncCount = 0
 
-		// Unlock the syncMu for other threads to queue up
-		w.syncMu.Unlock()
+		// Unlock the syncCond.L for other threads to queue up
+		w.syncCond.L.Unlock()
 
 		// If the sync fails we should abort to avoid more corruption
 		if err := w.logFile.Sync(); err != nil {
@@ -36,11 +36,11 @@ func (w *WAL) threadedSync() {
 	}
 }
 
-// fSync syncs the wal in regular intervalls
+// fSync syncs the WAL's underlying file.
 func (w *WAL) fSync() {
 	// We need to hold the lock of the condition before using it
-	w.syncMu.Lock()
-	defer w.syncMu.Unlock()
+	w.syncCond.L.Lock()
+	defer w.syncCond.L.Unlock()
 
 	// If there is currently no instance of the syncing thread create one
 	if !w.syncing {
