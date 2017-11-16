@@ -5,8 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io/ioutil"
-	"log"
-	"math/rand"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -202,12 +201,12 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 	sus := make([]*siloUpdate, 0, len(s.numbers))
 	for {
 		// Change between 1 and len(s.numbers)
-		length := rand.Intn(len(s.numbers)) + 1
+		length := fastrand.Intn(len(s.numbers)) + 1
 		var ocs = s.checksum()
 		var ncs checksum
 		var appendFrom = length
 		for j := 0; j < length; j++ {
-			if appendFrom == length && j > 0 && rand.Intn(500) == 0 {
+			if appendFrom == length && j > 0 && fastrand.Intn(500) == 0 {
 				// There is a 0.5% chance that the remaing updates will be
 				// appended after the transaction was created
 				appendFrom = j
@@ -247,7 +246,6 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 
 		// Append the remaining updates
 		if err := txn.Append(updates[appendFrom:]); err != nil {
-			log.Print("appended ", len(updates[appendFrom:]), " off ", len(updates))
 			return
 		}
 
@@ -391,9 +389,15 @@ func TestSilo(t *testing.T) {
 	var numRetries = 1000
 	var wg sync.WaitGroup
 	var counters = make([]int, maxCntr, maxCntr)
+	var endTime = time.Now().Add(5 * time.Minute)
+	var iters = 0
 
 	// Write silos, pull the plug and verify repeatedly
 	for cntr := 0; cntr < maxCntr; cntr++ {
+		if time.Now().After(endTime) {
+			// Stop if test takes too long
+			break
+		}
 		deps.disable(true)
 
 		// Create new fake database file
@@ -437,35 +441,28 @@ func TestSilo(t *testing.T) {
 		}
 
 		// Corrupt the disk
-		log.Print("corrupt disk")
 		deps.disable(false)
 
 		// Wait for all the threads to fail
 		wg.Wait()
-		log.Print("all threads stopped")
 
 		// Close wal
 		if err := wal.logFile.Close(); err != nil {
 			t.Error(err)
 		}
 
-		// Repeatedly try to recover WAL
+		// Reset dependencies and set limit to a high value that can never be
+		// reached to make sure we can recover after enough tries
 		deps.reset()
-		*deps.writeLimit = 10000000
+		*deps.writeLimit = math.MaxUint64
+
+		// Repeatedly try to recover WAL
 		err = build.Retry(numRetries, time.Millisecond, func() error {
 			counters[cntr]++
-			log.Print(counters[cntr])
-			// Reset deps if the failDenominator is already above the
-			// writeLimitl. Otherwise we only need to reset deps.failed. This
-			// reduces the chance of disk corruption after every iteration.
+			// Reset failed and try again
 			deps.mu.Lock()
 			*deps.failed = false
-			if *deps.failDenominator > *deps.writeLimit {
-				deps.mu.Unlock()
-				deps.reset()
-			} else {
-				deps.mu.Unlock()
-			}
+			deps.mu.Unlock()
 
 			// Try to recover WAL
 			return recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
@@ -473,11 +470,18 @@ func TestSilo(t *testing.T) {
 		if err != nil {
 			t.Fatalf("WAL never recovered: %v", err)
 		}
+
+		// Increment iterations
+		iters++
 	}
+
+	// Log some statistics
 	avgCounter := 0
 	for _, n := range counters {
 		avgCounter += n
 	}
 	avgCounter /= len(counters)
+
+	t.Logf("Number of iterations: %v", iters)
 	t.Logf("Average number of retries: %v", avgCounter)
 }

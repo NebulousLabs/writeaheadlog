@@ -82,8 +82,8 @@ type faultyDiskDependency struct {
 	// failDenominator, and it starts at 2. This means that the more calls to
 	// WriteAt, the less likely the write is to fail. All calls will start
 	// automatically failing after writeLimit writes.
-	failDenominator *int
-	writeLimit      *int
+	failDenominator *uint64
+	writeLimit      *uint64
 	failed          *bool
 	disabled        *bool
 	mu              *sync.Mutex
@@ -92,8 +92,8 @@ type faultyDiskDependency struct {
 // newFaultyDiskDependency creates a dependency that can be used to simulate a
 // failing disk. writeLimit is the maximum number of writes the disk will
 // endure before failing
-func newFaultyDiskDependency(writeLimit int) faultyDiskDependency {
-	var denominator = 3
+func newFaultyDiskDependency(writeLimit uint64) faultyDiskDependency {
+	var denominator = uint64(3)
 	var failed = false
 	var disabled = false
 	return faultyDiskDependency{
@@ -130,7 +130,7 @@ func (d faultyDiskDependency) remove(path string) error {
 	defer d.mu.Unlock()
 
 	if !*d.disabled {
-		fail := fastrand.Intn(*d.failDenominator) == 0
+		fail := fastrand.Intn(int(*d.failDenominator)) == 0
 		*d.failDenominator++
 		if fail || *d.failDenominator >= *d.writeLimit {
 			*d.failed = true
@@ -154,7 +154,7 @@ func (f *faultyFile) Write(p []byte) (int, error) {
 	defer f.d.mu.Unlock()
 
 	if !*f.d.disabled {
-		fail := fastrand.Intn(*f.d.failDenominator) == 0
+		fail := fastrand.Intn(int(*f.d.failDenominator)) == 0
 		*f.d.failDenominator++
 		if fail || *f.d.failDenominator >= *f.d.writeLimit {
 			*f.d.failed = true
@@ -175,7 +175,7 @@ func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	defer f.d.mu.Unlock()
 
 	if !*f.d.disabled {
-		fail := fastrand.Intn(*f.d.failDenominator) == 0
+		fail := fastrand.Intn(int(*f.d.failDenominator)) == 0
 		*f.d.failDenominator++
 		if fail || *f.d.failDenominator >= *f.d.writeLimit {
 			*f.d.failed = true
