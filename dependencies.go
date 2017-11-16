@@ -132,7 +132,7 @@ func (d faultyDiskDependency) remove(path string) error {
 	if !*d.disabled {
 		fail := fastrand.Intn(int(*d.failDenominator)) == 0
 		*d.failDenominator++
-		if fail || *d.failDenominator >= *d.writeLimit {
+		if fail || *d.failed || *d.failDenominator >= *d.writeLimit {
 			*d.failed = true
 			return nil
 		}
@@ -156,9 +156,10 @@ func (f *faultyFile) Write(p []byte) (int, error) {
 	if !*f.d.disabled {
 		fail := fastrand.Intn(int(*f.d.failDenominator)) == 0
 		*f.d.failDenominator++
-		if fail || *f.d.failDenominator >= *f.d.writeLimit {
+		if fail || *f.d.failed || *f.d.failDenominator >= *f.d.writeLimit {
 			*f.d.failed = true
-			return len(p), nil
+			// Write random amount of bytes on failure
+			return f.file.Write(fastrand.Bytes(fastrand.Intn(len(p) + 1)))
 		}
 	}
 	return f.file.Write(p)
@@ -177,9 +178,10 @@ func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	if !*f.d.disabled {
 		fail := fastrand.Intn(int(*f.d.failDenominator)) == 0
 		*f.d.failDenominator++
-		if fail || *f.d.failDenominator >= *f.d.writeLimit {
+		if fail || *f.d.failed || *f.d.failDenominator >= *f.d.writeLimit {
 			*f.d.failed = true
-			return len(p), nil
+			// Write random amount of bytes on failure
+			return f.file.WriteAt(fastrand.Bytes(fastrand.Intn(len(p)+1)), off)
 		}
 	}
 	return f.file.WriteAt(p, off)

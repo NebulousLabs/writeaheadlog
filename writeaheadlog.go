@@ -189,7 +189,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 
 	if recoveryState == recoveryStateClean {
 		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
-			return nil, err
+			return nil, build.ExtendErr("unable to write WAL recovery state", err)
 		}
 		w.recoveryComplete = true
 		return []Update{}, nil
@@ -202,7 +202,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 			return nil, err
 		}
 		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
-			return nil, err
+			return nil, build.ExtendErr("unable to write WAL recovery state", err)
 		}
 		w.recoveryComplete = true
 		return []Update{}, w.logFile.Sync()

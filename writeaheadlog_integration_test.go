@@ -20,20 +20,14 @@ import (
 
 type (
 	silo struct {
-		// offset is the file offset in the fake database
-		offset int64
+		// list of numbers in silo and the index of the next number that will
+		// be incremented
+		numbers    []uint32
+		nextNumber uint32
 
-		// numbers contains the set of numbers of the silo
-		numbers []uint32
-
-		// f is the file on which the silo is stored
-		f file
-
-		// i is the index of the number that needs to be incremented next
-		i uint32
-
-		// deps are the dependencies that is used to handle file IO
-		deps dependencies
+		f      file  // database file holding silo
+		offset int64 // offset within database
+		deps   dependencies
 	}
 
 	siloUpdate struct {
@@ -46,19 +40,19 @@ type (
 		// silo is the offset of the silo so we can apply the update to the right silo
 		silo int64
 
-		// ocs is the checksum of the file that became obsolete after changing a
+		// oldChecksum is the checksum of the file that became obsolete after changing a
 		// number. It needs to be removed when the update is applied.
-		ocs checksum
+		oldChecksum checksum
 
-		// ncs is the new checkum of the silo and the corresponding file
-		ncs checksum
+		// newChecksum is the new checkum of the silo and the corresponding file
+		newChecksum checksum
 
 		// ncso is the offset of the new checksum
-		ncso int64
+		newChecksumOffset int64
 	}
 )
 
-// newSilo creates a new silo of a certain length at s specific offset in the
+// newSilo creates a new silo of a certain length at a specific offset in the
 // file
 func newSilo(offset int64, length int, deps dependencies, f file) *silo {
 	if length == 0 {
@@ -79,9 +73,9 @@ func (su siloUpdate) marshal() []byte {
 	binary.LittleEndian.PutUint64(data[0:8], uint64(su.offset))
 	binary.LittleEndian.PutUint32(data[8:12], su.number)
 	binary.LittleEndian.PutUint64(data[12:20], uint64(su.silo))
-	binary.LittleEndian.PutUint64(data[20:28], uint64(su.ncso))
-	copy(data[28:28+checksumSize], su.ocs[:])
-	copy(data[28+checksumSize:], su.ncs[:])
+	binary.LittleEndian.PutUint64(data[20:28], uint64(su.newChecksumOffset))
+	copy(data[28:28+checksumSize], su.oldChecksum[:])
+	copy(data[28+checksumSize:], su.newChecksum[:])
 	return data
 }
 
@@ -93,14 +87,14 @@ func (su *siloUpdate) unmarshal(data []byte) {
 	su.offset = int64(binary.LittleEndian.Uint64(data[0:8]))
 	su.number = binary.LittleEndian.Uint32(data[8:12])
 	su.silo = int64(binary.LittleEndian.Uint64(data[12:20]))
-	su.ncso = int64(binary.LittleEndian.Uint64(data[20:28]))
-	copy(su.ocs[:], data[28:28+checksumSize])
-	copy(su.ncs[:], data[28+checksumSize:])
+	su.newChecksumOffset = int64(binary.LittleEndian.Uint64(data[20:28]))
+	copy(su.oldChecksum[:], data[28:28+checksumSize])
+	copy(su.newChecksum[:], data[28+checksumSize:])
 	return
 }
 
 // newUpdate create a WAL update from a siloUpdate
-func newUpdate(su *siloUpdate) Update {
+func (su *siloUpdate) newUpdate() Update {
 	update := Update{
 		Name:         "This is my update. There are others like it but this one is mine",
 		Version:      "v0.9.8.7.6.5.4.3.2.1.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z",
@@ -112,11 +106,11 @@ func newUpdate(su *siloUpdate) Update {
 // newSiloUpdate creates a new Silo update for a number at a specific index
 func (s *silo) newSiloUpdate(index uint32, number uint32, ocs checksum) *siloUpdate {
 	return &siloUpdate{
-		number: number,
-		offset: s.offset + int64(4*(index)),
-		silo:   s.offset,
-		ocs:    ocs,
-		ncso:   s.offset + int64(len(s.numbers)*4),
+		number:            number,
+		offset:            s.offset + int64(4*(index)),
+		silo:              s.offset,
+		oldChecksum:       ocs,
+		newChecksumOffset: s.offset + int64(len(s.numbers)*4),
 	}
 }
 
@@ -146,13 +140,13 @@ func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 	}
 
 	// Write new checksum
-	_, err = silo.f.WriteAt(su.ncs[:], su.ncso)
+	_, err = silo.f.WriteAt(su.newChecksum[:], su.newChecksumOffset)
 	if err != nil {
 		return err
 	}
 
 	// Delete old data file if it still exists
-	err = silo.deps.remove(filepath.Join(dataPath, hex.EncodeToString(su.ocs[:])))
+	err = silo.deps.remove(filepath.Join(dataPath, hex.EncodeToString(su.oldChecksum[:])))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -190,47 +184,50 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string, ncs checksum
 	}
 
 	// sync changes
-	done <- build.ComposeErrors(syncErr)
+	done <- syncErr
 }
 
-// threadedUpdate updates a silo 1000 times and leaves the last transaction unapplied.
+// threadedUpdate updates a silo until a sync fails
 func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	// Allocate some memory for the updates
 	sus := make([]*siloUpdate, 0, len(s.numbers))
+
+	// This thread will execute until the dependency of the silo causes a file
+	// sync to fail
 	for {
 		// Change between 1 and len(s.numbers)
 		length := fastrand.Intn(len(s.numbers)) + 1
-		var ocs = s.checksum()
+		ocs := s.checksum()
+		appendFrom := length
 		var ncs checksum
-		var appendFrom = length
 		for j := 0; j < length; j++ {
 			if appendFrom == length && j > 0 && fastrand.Intn(500) == 0 {
 				// There is a 0.5% chance that the remaing updates will be
 				// appended after the transaction was created
 				appendFrom = j
 			}
-			if s.i == 0 {
-				s.numbers[s.i] = (s.numbers[len(s.numbers)-1] + 1)
+			if s.nextNumber == 0 {
+				s.numbers[s.nextNumber] = (s.numbers[len(s.numbers)-1] + 1)
 			} else {
-				s.numbers[s.i] = (s.numbers[s.i-1] + 1)
+				s.numbers[s.nextNumber] = (s.numbers[s.nextNumber-1] + 1)
 			}
 			ncs = s.checksum()
 
 			// Create siloUpdate
-			su := s.newSiloUpdate(s.i, s.numbers[s.i], ocs)
+			su := s.newSiloUpdate(s.nextNumber, s.numbers[s.nextNumber], ocs)
 			sus = append(sus, su)
 
 			// Increment the index. If that means we reach the end, set it to 0
-			s.i = (s.i + 1) % uint32(len(s.numbers))
+			s.nextNumber = (s.nextNumber + 1) % uint32(len(s.numbers))
 		}
 
 		// Set the siloUpdates checksum and create the corresponding update
 		updates := make([]Update, 0, len(s.numbers))
 		for _, su := range sus {
-			copy(su.ncs[:], ncs[:])
-			updates = append(updates, newUpdate(su))
+			copy(su.newChecksum[:], ncs[:])
+			updates = append(updates, su.newUpdate())
 		}
 
 		// Start setup write
@@ -308,7 +305,7 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 		}
 		// Remember new checksums to be able to remove unnecessary setup files
 		// later
-		checksums[hex.EncodeToString(su.ncs[:])] = struct{}{}
+		checksums[hex.EncodeToString(su.newChecksum[:])] = struct{}{}
 	}
 
 	// Sync the applied updates
@@ -371,7 +368,7 @@ func TestSilo(t *testing.T) {
 		t.SkipNow()
 	}
 
-	deps := newFaultyDiskDependency(1000)
+	deps := newFaultyDiskDependency(5000)
 	testdir := build.TempDir("wal", t.Name())
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
@@ -383,14 +380,15 @@ func TestSilo(t *testing.T) {
 	deps.disable(true)
 
 	// Declare some vars to configure the loop
-	var numSilos = int64(250)
-	var numIncrease = 20
-	var maxCntr = 50
-	var numRetries = 1000
 	var wg sync.WaitGroup
-	var counters = make([]int, maxCntr, maxCntr)
-	var endTime = time.Now().Add(5 * time.Minute)
-	var iters = 0
+	numSilos := int64(250)
+	numIncrease := 20
+	maxCntr := 50
+	numRetries := 1000
+	counters := make([]int, maxCntr, maxCntr)
+	endTime := time.Now().Add(5 * time.Minute)
+	iters := 0
+	maxTries := 0
 
 	// Write silos, pull the plug and verify repeatedly
 	for cntr := 0; cntr < maxCntr; cntr++ {
@@ -482,6 +480,17 @@ func TestSilo(t *testing.T) {
 	}
 	avgCounter /= len(counters)
 
+	walFile, err := os.Open(walPath)
+	if err != nil {
+		t.Errorf("Failed to open wal: %v", err)
+	}
+	fi, err := walFile.Stat()
+	if err != nil {
+		t.Errorf("Failed to get wal fileinfo: %v", err)
+	}
+
 	t.Logf("Number of iterations: %v", iters)
+	t.Logf("Max number of retries: %v", maxTries)
 	t.Logf("Average number of retries: %v", avgCounter)
+	t.Logf("WAL size: %v bytes", fi.Size())
 }
