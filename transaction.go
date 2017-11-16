@@ -136,8 +136,12 @@ func (t *Transaction) commit(done chan error) {
 		return
 	}
 
+	if err := t.wal.fSync(); err != nil {
+		done <- build.ExtendErr("Writing the first page failed", err)
+		return
+	}
+
 	t.commitComplete = true
-	t.wal.fSync()
 }
 
 // marshalUpdates marshals the updates of a transaction
@@ -265,7 +269,9 @@ func (t *Transaction) SignalUpdatesApplied() error {
 	if err != nil {
 		return build.ExtendErr("Couldn't write the page to file", err)
 	}
-	t.wal.fSync()
+	if err := t.wal.fSync(); err != nil {
+		return build.ExtendErr("Couldn't write the page to file", err)
+	}
 
 	// Update the wal's available pages
 	t.wal.mu.Lock()
@@ -337,7 +343,10 @@ func (t *Transaction) append(updates []Update, done chan error) {
 			return
 		}
 	}
-	t.wal.fSync()
+	if err := t.wal.fSync(); err != nil {
+		done <- build.ExtendErr("Writing the new pages to disk failed", err)
+		return
+	}
 
 	// Link the new pages to the last one and sync the last page
 	b := lastPage.appendTo(buf[:0])
@@ -345,7 +354,10 @@ func (t *Transaction) append(updates []Update, done chan error) {
 		done <- build.ExtendErr("Writing the last page to disk failed", err)
 		return
 	}
-	t.wal.fSync()
+	if err := t.wal.fSync(); err != nil {
+		done <- build.ExtendErr("Writing the last page to disk failed", err)
+		return
+	}
 
 	// Append the updates to the transaction
 	t.Updates = append(t.Updates, updates...)

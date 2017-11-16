@@ -148,63 +148,10 @@ func TestCommitFailed(t *testing.T) {
 	}
 }
 
-// TestWALInconsistentSync verifies that the WAL handles the case where the
-// file randomly fails writes. When the file failes a write, it returns an
-// error on sync.
-func TestWALInconsistentSync(t *testing.T) {
-	var wt *walTester
-	// initialize a new wal using the faulty disk dependency. Retry since the
-	// faulty disk can cause initialization to fail
-	err := build.Retry(50, time.Millisecond*100, func() error {
-		tester, err := newWALTester(t.Name(), newFaultyDiskDependency(5000))
-		if err != nil {
-			return err
-		}
-		wt = tester
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer wt.Close()
-
-	// for 20 seconds, create large transactions and commit them to the wal, then
-	// reopen the WAL. The WAL should stay consistent.
-	for start := time.Now(); time.Since(start) < time.Second*20; time.Sleep(time.Millisecond * 100) {
-		err := func() error {
-			updates := []Update{}
-			for i := 0; i < 99; i++ {
-				updates = append(updates, Update{
-					Name:         "test",
-					Version:      "1.0",
-					Instructions: fastrand.Bytes(1234),
-				})
-			}
-
-			// Create the transaction
-			txn, err := wt.wal.NewTransaction(updates)
-			if err != nil {
-				return err
-			}
-			wait := txn.SignalSetupComplete()
-			if err := <-wait; err != nil {
-				return err
-			}
-			if err := txn.SignalUpdatesApplied(); err != nil {
-				return err
-			}
-
-			_, w, err := New(wt.path)
-			if err != nil {
-				return err
-			}
-			w.Close()
-			return nil
-		}()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+// TestMisleadingWrite tests the scenario where Write returns nil, but Sync
+// later returns an error.
+func TestMisleadingWrite(t *testing.T) {
+	t.Skip("not implemented yet")
 }
 
 // TestReleaseFailed checks if a corruption of the first page of the
