@@ -154,6 +154,42 @@ func TestMisleadingWrite(t *testing.T) {
 	t.Skip("not implemented yet")
 }
 
+func BenchmarkMarshalUpdates(b *testing.B) {
+	updates := make([]Update, 100)
+	for i := range updates {
+		updates[i] = Update{
+			Name:         "test",
+			Version:      "1.0",
+			Instructions: fastrand.Bytes(1234),
+		}
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		marshalUpdates(updates)
+	}
+}
+
+func BenchmarkUnmarshalUpdates(b *testing.B) {
+	updates := make([]Update, 100)
+	for i := range updates {
+		updates[i] = Update{
+			Name:         "test",
+			Version:      "1.0",
+			Instructions: fastrand.Bytes(1234),
+		}
+	}
+	data := marshalUpdates(updates)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, err := unmarshalUpdates(data)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // TestReleaseFailed checks if a corruption of the first page of the
 // transaction during the commit is handled correctly
 func TestReleaseFailed(t *testing.T) {
