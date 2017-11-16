@@ -2,9 +2,10 @@ package writeaheadlog
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
+
+	"github.com/NebulousLabs/errors"
 )
 
 // page is an on-disk page in the logFile which contains information about

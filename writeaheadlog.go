@@ -6,12 +6,13 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"math"
 	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
+
+	"github.com/NebulousLabs/errors"
 )
 
 // WAL is a general purpose, high performance write-ahead-log for performing
@@ -128,23 +129,23 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 		// Recover WAL and return updates
 		updates, err := newWal.recoverWal(data)
 		if err != nil {
-			err = composeErrors(err, newWal.logFile.Close())
+			err = errors.Compose(err, newWal.logFile.Close())
 		}
 		return updates, newWal, err
 
 	} else if !os.IsNotExist(err) {
 		// the file exists but couldn't be opened
-		return nil, nil, extendErr("walFile was not opened successfully", err)
+		return nil, nil, errors.Extend(err, errors.New("walFile was not opened successfully"))
 	}
 
 	// Create new empty WAL
 	newWal.logFile, err = deps.create(path)
 	if err != nil {
-		return nil, nil, extendErr("walFile could not be created", err)
+		return nil, nil, errors.Extend(err, errors.New("walFile could not be created"))
 	}
 	// Write the metadata to the WAL
 	if err = writeWALMetadata(newWal.logFile); err != nil {
-		return nil, nil, extendErr("Failed to write metadata to file", err)
+		return nil, nil, errors.Extend(err, errors.New("Failed to write metadata to file"))
 	}
 	// No recovery needs to be performed.
 	newWal.recoveryComplete = true
@@ -369,7 +370,7 @@ func unmarshalPage(p *page, b []byte) (nextPage uint64, err error) {
 
 	// Check for errors
 	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
-		err = composeErrors(errors.New("Failed to unmarshal wal page"), err1, err2, err3, err4, err5, err6)
+		err = errors.Compose(errors.New("Failed to unmarshal wal page"), err1, err2, err3, err4, err5, err6)
 		return
 	}
 
@@ -424,7 +425,7 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 
 	// Restore updates from payload
 	if txn.Updates, err = unmarshalUpdates(txnPayload); err != nil {
-		return extendErr("Unable to unmarshal updates", err)
+		return errors.Extend(err, errors.New("Unable to unmarshal updates"))
 	}
 
 	// Set flags accordingly
@@ -489,7 +490,7 @@ func (w *WAL) Close() error {
 	err2 := w.logFile.Close()
 	close(w.stopChan)
 
-	return composeErrors(err1, err2)
+	return errors.Compose(err1, err2)
 }
 
 // New will open a WAL. If the previous run did not shut down cleanly, a set of

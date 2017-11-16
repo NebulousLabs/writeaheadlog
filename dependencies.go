@@ -1,12 +1,12 @@
 package writeaheadlog
 
 import (
-	"errors"
 	"io"
 	"io/ioutil"
 	"os"
 	"sync"
 
+	"github.com/NebulousLabs/errors"
 	"github.com/NebulousLabs/fastrand"
 )
 

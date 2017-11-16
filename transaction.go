@@ -3,10 +3,9 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"sync/atomic"
 
-	"github.com/NebulousLabs/Sia/build"
+	"github.com/NebulousLabs/errors"
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -131,12 +130,12 @@ func (t *Transaction) commit(done chan error) {
 		return
 	}
 	if _, err := t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset)); err != nil {
-		done <- extendErr("Writing the first page failed", err)
+		done <- errors.Extend(err, errors.New("Writing the first page failed"))
 		return
 	}
 
 	if err := t.wal.fSync(); err != nil {
-		done <- build.ExtendErr("Writing the first page failed", err)
+		done <- errors.Extend(err, errors.New("Writing the first page failed"))
 		return
 	}
 
@@ -239,7 +238,7 @@ func initTransaction(t *Transaction) {
 
 	// write the pages to disk
 	if err := t.writeToFile(); err != nil {
-		t.initErr = extendErr("Couldn't write the page to file", err)
+		t.initErr = errors.Extend(err, errors.New("Couldn't write the page to file"))
 		return
 	}
 }
@@ -274,10 +273,10 @@ func (t *Transaction) SignalUpdatesApplied() error {
 		_, err = t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset))
 	}
 	if err != nil {
-		return extendErr("Couldn't write the page to file", err)
+		return errors.Extend(err, errors.New("Couldn't write the page to file"))
 	}
 	if err := t.wal.fSync(); err != nil {
-		return build.ExtendErr("Couldn't write the page to file", err)
+		return errors.Extend(err, errors.New("Couldn't write the page to file"))
 	}
 
 	// Update the wal's available pages
@@ -346,23 +345,23 @@ func (t *Transaction) append(updates []Update, done chan error) {
 	for _, page := range pages {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
-			done <- extendErr("Writing the page to disk failed", err)
+			done <- errors.Extend(err, errors.New("Writing the page to disk failed"))
 			return
 		}
 	}
 	if err := t.wal.fSync(); err != nil {
-		done <- build.ExtendErr("Writing the new pages to disk failed", err)
+		done <- errors.Extend(err, errors.New("Writing the new pages to disk failed"))
 		return
 	}
 
 	// Link the new pages to the last one and sync the last page
 	b := lastPage.appendTo(buf[:0])
 	if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
-		done <- extendErr("Writing the last page to disk failed", err)
+		done <- errors.Extend(err, errors.New("Writing the last page to disk failed"))
 		return
 	}
 	if err := t.wal.fSync(); err != nil {
-		done <- build.ExtendErr("Writing the last page to disk failed", err)
+		done <- errors.Extend(err, errors.New("Writing the last page to disk failed"))
 		return
 	}
 
@@ -433,7 +432,7 @@ func (t *Transaction) writeToFile() error {
 	for page := t.firstPage; page != nil; page = page.nextPage {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
-			return extendErr("Writing the page to disk failed", err)
+			return errors.Extend(err, errors.New("Writing the page to disk failed"))
 		}
 	}
 	return nil
