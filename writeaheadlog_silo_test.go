@@ -205,7 +205,13 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 		length := rand.Intn(len(s.numbers)) + 1
 		var ocs = s.checksum()
 		var ncs checksum
+		var appendFrom = length
 		for j := 0; j < length; j++ {
+			if appendFrom == length && j > 0 && rand.Intn(500) == 0 {
+				// There is a 0.5% chance that the remaing updates will be
+				// appended after the transaction was created
+				appendFrom = j
+			}
 			if s.i == 0 {
 				s.numbers[s.i] = (s.numbers[len(s.numbers)-1] + 1)
 			} else {
@@ -233,9 +239,15 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 		go s.threadedSetupWrite(wait, dataPath, ncs)
 
 		// Create txn
-		txn, err := w.NewTransaction(updates)
+		txn, err := w.NewTransaction(updates[:appendFrom])
 		if err != nil {
 			t.Error(err)
+			return
+		}
+
+		// Append the remaining updates
+		if err := txn.Append(updates[appendFrom:]); err != nil {
+			log.Print("appended ", len(updates[appendFrom:]), " off ", len(updates))
 			return
 		}
 
