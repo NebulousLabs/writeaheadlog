@@ -246,7 +246,6 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 
 		// Signal setup complete
 		if err := <-txn.SignalSetupComplete(); err != nil {
-			t.Error(err)
 			return
 		}
 
@@ -265,7 +264,6 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 
 		// Signal release complete
 		if err := txn.SignalUpdatesApplied(); err != nil {
-			t.Error(err)
 			return
 		}
 
@@ -376,7 +374,7 @@ func TestSilo(t *testing.T) {
 	// Declare some vars to configure the loop
 	var numSilos = int64(250)
 	var numIncrease = 20
-	var maxCntr = 20
+	var maxCntr = 10
 	var numRetries = 1000
 	var wg sync.WaitGroup
 	var counters = make([]int, maxCntr, maxCntr)
