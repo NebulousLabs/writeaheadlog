@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -424,10 +425,12 @@ func TestSilo(t *testing.T) {
 		}
 
 		// Corrupt the disk
+		log.Print("corrupt disk")
 		deps.disable(false)
 
 		// Wait for all the threads to fail
 		wg.Wait()
+		log.Print("all threads stopped")
 
 		// Close wal
 		if err := wal.logFile.Close(); err != nil {
@@ -437,9 +440,9 @@ func TestSilo(t *testing.T) {
 		// Repeatedly try to recover WAL
 		deps.reset()
 		*deps.writeLimit = 10000000
-		deps.disable(true)
 		err = build.Retry(numRetries, time.Millisecond, func() error {
 			counters[cntr]++
+			log.Print(counters[cntr])
 			// Reset deps if the failDenominator is already above the
 			// writeLimitl. Otherwise we only need to reset deps.failed. This
 			// reduces the chance of disk corruption after every iteration.
@@ -455,7 +458,6 @@ func TestSilo(t *testing.T) {
 			// Try to recover WAL
 			return recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
 		})
-		deps.disable(false)
 		if err != nil {
 			t.Fatalf("WAL never recovered: %v", err)
 		}
