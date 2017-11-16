@@ -385,7 +385,7 @@ func TestSilo(t *testing.T) {
 	// Declare some vars to configure the loop
 	var numSilos = int64(250)
 	var numIncrease = 20
-	var maxCntr = 10
+	var maxCntr = 50
 	var numRetries = 1000
 	var wg sync.WaitGroup
 	var counters = make([]int, maxCntr, maxCntr)
