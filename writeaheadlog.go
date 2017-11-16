@@ -20,6 +20,16 @@ import (
 // ACID transactions to disk without sacrificing speed or latency more than
 // fundamentally required.
 type WAL struct {
+	// atomicNextTxnNum is used to give every transaction a unique transaction
+	// number. The transaction will then wait until atomicTransactionCounter allows
+	// the transaction to be committed. This ensures that transactions are committed
+	// in the correct order.
+	atomicNextTxnNum uint64
+
+	// atomicUnfinishedTxns counts how many transactions were created but not
+	// released yet. This counter needs to be 0 for the wal to exit cleanly.
+	atomicUnfinishedTxns int64
+
 	// availablePages lists the offset of file pages which currently have completed or
 	// voided updates in them. The pages are in no particular order.
 	availablePages []uint64
@@ -29,12 +39,6 @@ type WAL struct {
 	// for a new transaction, then the file is extended, new pages are added,
 	// and the availablePages array is updated to include the extended pages.
 	filePageCount int
-
-	// atomicNextTxnNum is used to give every transaction a unique transaction
-	// number. The transaction will then wait until atomicTransactionCounter allows
-	// the transaction to be committed. This ensures that transactions are committed
-	// in the correct order.
-	atomicNextTxnNum uint64
 
 	// logFile contains all of the persistent data associated with the log.
 	logFile file
@@ -48,10 +52,6 @@ type WAL struct {
 	// syncCond is used to schedule the calls to fsync
 	syncCond *sync.Cond
 
-	// syncMu is the lock contained in syncCond and must be held before
-	// changing the state of the syncCond
-	syncMu sync.Mutex
-
 	// syncCount is a counter that indicates how many transactions are
 	// currently waiting for a fsync
 	syncCount uint64
@@ -59,8 +59,8 @@ type WAL struct {
 	// stopChan is a channel that is used to signal a shutdown
 	stopChan chan struct{}
 
-	// syncing indicates if the syncing thread is currently being executed
-	syncing bool
+	// syncErr is the error returned by the most recent fsync call
+	syncErr error
 
 	// recoveryComplete indicates if the caller signalled that the recovery is complete
 	recoveryComplete bool
@@ -69,10 +69,6 @@ type WAL struct {
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
 	deps dependencies
-
-	// atomicUnfinishedTxns counts how many transactions were created but not
-	// released yet. This counter needs to be 0 for the wal to exit cleanly.
-	atomicUnfinishedTxns int64
 }
 
 type (
@@ -117,11 +113,11 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	newWal := &WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),
+		syncCond: sync.NewCond(new(sync.Mutex)),
 		path:     path,
 	}
 
 	// Create a condition for the wal
-	newWal.syncCond = sync.NewCond(&newWal.syncMu)
 	// Try opening the WAL file.
 	data, err := deps.readFile(path)
 	if err == nil {
@@ -330,6 +326,7 @@ func (w *WAL) managedReservePages(data []byte) []page {
 	w.availablePages = w.availablePages[:len(w.availablePages)-numPages]
 
 	// Set the fields of each page
+	buf := bytes.NewBuffer(data)
 	pages := make([]page, numPages)
 	for i := range pages {
 		// Set offset according to the index in reservedPages
@@ -345,12 +342,7 @@ func (w *WAL) managedReservePages(data []byte) []page {
 		pages[i].pageStatus = pageStatusOther
 
 		// Copy part of the update into the payload
-		payloadsize := MaxPayloadSize
-		if len(data[i*MaxPayloadSize:]) < payloadsize {
-			payloadsize = len(data[i*MaxPayloadSize:])
-		}
-		pages[i].payload = make([]byte, payloadsize)
-		copy(pages[i].payload, data[i*MaxPayloadSize:])
+		pages[i].payload = buf.Next(MaxPayloadSize)
 	}
 
 	return pages
