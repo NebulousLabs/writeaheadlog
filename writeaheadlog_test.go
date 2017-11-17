@@ -123,7 +123,7 @@ func transactionPages(txn *Transaction) (pages []page) {
 // TestCommitFailed checks if a corruption of the first page of the
 // transaction during the commit is handled correctly
 func TestCommitFailed(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyCommitFail{})
+	wt, err := newWALTester(t.Name(), &dependencyCommitFail{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func BenchmarkUnmarshalUpdates(b *testing.B) {
 // TestReleaseFailed checks if a corruption of the first page of the
 // transaction during the commit is handled correctly
 func TestReleaseFailed(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyReleaseFail{})
+	wt, err := newWALTester(t.Name(), &dependencyReleaseFail{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestReleaseFailed(t *testing.T) {
 // TestReleaseNotCalled checks if an interrupt between committing and releasing a
 // transaction is handled correctly upon reboot
 func TestReleaseNotCalled(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestReleaseNotCalled(t *testing.T) {
 // no unfinished transactions should be reported because the second one is
 // assumed to be corrupted too
 func TestPayloadCorrupted(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestPayloadCorrupted(t *testing.T) {
 // TestPayloadCorrupted2 creates 2 update and corrupts the second one. Therefore
 // one unfinished transaction should be reported
 func TestPayloadCorrupted2(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestPayloadCorrupted2(t *testing.T) {
 // The wal won't be deleted but reloaded instead to check if the amount of returned failed updates
 // equals 0
 func TestWalParallel(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), &prodDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +542,7 @@ func TestWalParallel(t *testing.T) {
 
 // TestPageRecycling checks if pages are actually freed and used again after a transaction was applied
 func TestPageRecycling(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), &prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -612,7 +612,7 @@ func TestPageRecycling(t *testing.T) {
 
 // TestRestoreTransactions checks that restoring transactions from a WAL works correctly
 func TestRestoreTransactions(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -722,7 +722,7 @@ func TestRestoreTransactions(t *testing.T) {
 // TestRecoveryFailed checks if the WAL behave correctly if a crash occurs
 // during a call to RecoveryComplete
 func TestRecoveryFailed(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -754,7 +754,7 @@ func TestRecoveryFailed(t *testing.T) {
 		t.Error("There should have been an error but there wasn't")
 	}
 
-	updates2, w, err := newWal(wt.path, dependencyRecoveryFail{})
+	updates2, w, err := newWal(wt.path, &dependencyRecoveryFail{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +809,7 @@ func TestRecoveryFailed(t *testing.T) {
 // TestTransactionAppend tests the functionality of the Transaction's append
 // call
 func TestTransactionAppend(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), &prodDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,7 +860,7 @@ func TestTransactionAppend(t *testing.T) {
 func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 	b.Logf("Running benchmark with %v threads", numThreads)
 
-	wt, err := newWALTester(b.Name(), prodDependencies{})
+	wt, err := newWALTester(b.Name(), &prodDependencies{})
 	if err != nil {
 		b.Error(err)
 	}

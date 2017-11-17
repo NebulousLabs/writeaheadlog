@@ -38,7 +38,7 @@ type dependencyCommitFail struct {
 	prodDependencies
 }
 
-func (dependencyCommitFail) disrupt(s string) bool {
+func (*dependencyCommitFail) disrupt(s string) bool {
 	if s == "CommitFail" {
 		return true
 	}
@@ -51,7 +51,7 @@ type dependencyReleaseFail struct {
 	prodDependencies
 }
 
-func (dependencyReleaseFail) disrupt(s string) bool {
+func (*dependencyReleaseFail) disrupt(s string) bool {
 	if s == "ReleaseFail" {
 		return true
 	}
@@ -61,17 +61,17 @@ func (dependencyReleaseFail) disrupt(s string) bool {
 // prodDependencies is a passthrough to the standard library calls
 type prodDependencies struct{}
 
-func (prodDependencies) disrupt(string) bool { return false }
-func (prodDependencies) readFile(path string) ([]byte, error) {
+func (*prodDependencies) disrupt(string) bool { return false }
+func (*prodDependencies) readFile(path string) ([]byte, error) {
 	return ioutil.ReadFile(path)
 }
-func (prodDependencies) openFile(path string, flag int, perm os.FileMode) (file, error) {
+func (*prodDependencies) openFile(path string, flag int, perm os.FileMode) (file, error) {
 	return os.OpenFile(path, flag, perm)
 }
-func (prodDependencies) create(path string) (file, error) {
+func (*prodDependencies) create(path string) (file, error) {
 	return os.Create(path)
 }
-func (prodDependencies) remove(path string) error {
+func (*prodDependencies) remove(path string) error {
 	return os.Remove(path)
 }
 
@@ -82,58 +82,52 @@ type faultyDiskDependency struct {
 	// failDenominator, and it starts at 2. This means that the more calls to
 	// WriteAt, the less likely the write is to fail. All calls will start
 	// automatically failing after writeLimit writes.
-	failDenominator *uint64
-	writeLimit      *uint64
-	failed          *bool
-	disabled        *bool
-	mu              *sync.Mutex
+	failDenominator uint64
+	writeLimit      uint64
+	failed          bool
+	disabled        bool
+	mu              sync.Mutex
 }
 
 // newFaultyDiskDependency creates a dependency that can be used to simulate a
 // failing disk. writeLimit is the maximum number of writes the disk will
 // endure before failing
 func newFaultyDiskDependency(writeLimit uint64) faultyDiskDependency {
-	var denominator = uint64(3)
-	var failed = false
-	var disabled = false
 	return faultyDiskDependency{
-		failDenominator: &denominator,
-		failed:          &failed,
-		writeLimit:      &writeLimit,
-		disabled:        &disabled,
-		mu:              new(sync.Mutex),
+		failDenominator: uint64(3),
+		writeLimit:      writeLimit,
 	}
 }
 
-func (faultyDiskDependency) disrupt(s string) bool {
+func (*faultyDiskDependency) disrupt(s string) bool {
 	return s == "FaultyDisk"
 }
-func (faultyDiskDependency) readFile(path string) ([]byte, error) {
+func (*faultyDiskDependency) readFile(path string) ([]byte, error) {
 	return ioutil.ReadFile(path)
 }
-func (d faultyDiskDependency) openFile(path string, flag int, perm os.FileMode) (file, error) {
+func (d *faultyDiskDependency) openFile(path string, flag int, perm os.FileMode) (file, error) {
 	f, err := os.OpenFile(path, flag, perm)
 	if err != nil {
 		return nil, err
 	}
 	return d.newFaultyFile(f), nil
 }
-func (d faultyDiskDependency) create(path string) (file, error) {
+func (d *faultyDiskDependency) create(path string) (file, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
 	}
 	return d.newFaultyFile(f), nil
 }
-func (d faultyDiskDependency) remove(path string) error {
+func (d *faultyDiskDependency) remove(path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if !*d.disabled {
-		fail := fastrand.Intn(int(*d.failDenominator)) == 0
-		*d.failDenominator++
-		if fail || *d.failed || *d.failDenominator >= *d.writeLimit {
-			*d.failed = true
+	if !d.disabled {
+		fail := fastrand.Intn(int(d.failDenominator)) == 0
+		d.failDenominator++
+		if fail || d.failed || d.failDenominator >= d.writeLimit {
+			d.failed = true
 			return nil
 		}
 	}
@@ -153,11 +147,11 @@ func (f *faultyFile) Write(p []byte) (int, error) {
 	f.d.mu.Lock()
 	defer f.d.mu.Unlock()
 
-	if !*f.d.disabled {
-		fail := fastrand.Intn(int(*f.d.failDenominator)) == 0
-		*f.d.failDenominator++
-		if fail || *f.d.failed || *f.d.failDenominator >= *f.d.writeLimit {
-			*f.d.failed = true
+	if !f.d.disabled {
+		fail := fastrand.Intn(int(f.d.failDenominator)) == 0
+		f.d.failDenominator++
+		if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
+			f.d.failed = true
 			// Write random amount of bytes on failure
 			return f.file.Write(fastrand.Bytes(fastrand.Intn(len(p) + 1)))
 		}
@@ -175,11 +169,11 @@ func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	f.d.mu.Lock()
 	defer f.d.mu.Unlock()
 
-	if !*f.d.disabled {
-		fail := fastrand.Intn(int(*f.d.failDenominator)) == 0
-		*f.d.failDenominator++
-		if fail || *f.d.failed || *f.d.failDenominator >= *f.d.writeLimit {
-			*f.d.failed = true
+	if !f.d.disabled {
+		fail := fastrand.Intn(int(f.d.failDenominator)) == 0
+		f.d.failDenominator++
+		if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
+			f.d.failed = true
 			// Write random amount of bytes on failure
 			return f.file.WriteAt(fastrand.Bytes(fastrand.Intn(len(p)+1)), off)
 		}
@@ -193,7 +187,7 @@ func (f *faultyFile) Sync() error {
 	f.d.mu.Lock()
 	defer f.d.mu.Unlock()
 
-	if !*f.d.disabled && *f.d.failed {
+	if !f.d.disabled && f.d.failed {
 		return errors.New("could not write to disk (faultyDisk)")
 	}
 	return f.file.Sync()
@@ -207,14 +201,14 @@ func (d *faultyDiskDependency) newFaultyFile(f *os.File) *faultyFile {
 // reset resets the failDenominator and the failed flag of the dependency
 func (d *faultyDiskDependency) reset() {
 	d.mu.Lock()
-	*d.failDenominator = 3
-	*d.failed = false
+	d.failDenominator = 3
+	d.failed = false
 	d.mu.Unlock()
 }
 
 // disabled allows the caller to temporarily disable the dependency
 func (d *faultyDiskDependency) disable(b bool) {
 	d.mu.Lock()
-	*d.disabled = b
+	d.disabled = b
 	d.mu.Unlock()
 }

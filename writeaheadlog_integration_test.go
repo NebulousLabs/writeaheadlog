@@ -405,7 +405,7 @@ func TestSilo(t *testing.T) {
 		}
 
 		// Create wal with disabled dependencies
-		updates, wal, err := newWal(walPath, deps)
+		updates, wal, err := newWal(walPath, &deps)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -417,7 +417,7 @@ func TestSilo(t *testing.T) {
 		// Reset dependencies and increase the write limit to allow for higher
 		// success rate
 		deps.reset()
-		*deps.writeLimit = 5000
+		deps.writeLimit = 5000
 
 		var siloOff int64
 		var siloOffsets []int64
@@ -426,7 +426,7 @@ func TestSilo(t *testing.T) {
 		// Start the threaded update after creating and initializing the silos
 		for i := 0; int64(i) < numSilos; i++ {
 			wg.Add(1)
-			silo := newSilo(siloOff, 1+i*numIncrease, deps, file)
+			silo := newSilo(siloOff, 1+i*numIncrease, &deps, file)
 			if err := silo.init(); err != nil {
 				t.Fatalf("Failed to init silo: %v", err)
 			}
@@ -451,18 +451,18 @@ func TestSilo(t *testing.T) {
 		// Reset dependencies and set limit to a high value that can never be
 		// reached to make sure we can recover after enough tries
 		deps.reset()
-		*deps.writeLimit = math.MaxUint64
+		deps.writeLimit = math.MaxUint64
 
 		// Repeatedly try to recover WAL
 		err = retry(numRetries, time.Millisecond, func() error {
 			counters[cntr]++
 			// Reset failed and try again
 			deps.mu.Lock()
-			*deps.failed = false
+			deps.failed = false
 			deps.mu.Unlock()
 
 			// Try to recover WAL
-			return recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
+			return recoverSiloWAL(walPath, &deps, silos, testdir, file, numSilos, numIncrease)
 		})
 		if err != nil {
 			t.Fatalf("WAL never recovered: %v", err)
