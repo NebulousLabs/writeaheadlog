@@ -11,9 +11,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/fastrand"
 )
+
+// tempDir joins the provided directories and prefixes them with the testing
+// directory.
+func tempDir(dirs ...string) string {
+	path := filepath.Join(os.TempDir(), "wal", filepath.Join(dirs...))
+	os.RemoveAll(path) // remove old test data
+	return path
+}
 
 //dependencyUncleanShutdown prevnts the wal from marking the logfile as clean
 //upon shutdown
@@ -63,7 +70,7 @@ func (wt *walTester) Close() error {
 // newWalTester returns a ready-to-rock walTester.
 func newWALTester(name string, deps dependencies) (*walTester, error) {
 	// Create temp dir
-	testdir := build.TempDir("wal", name)
+	testdir := tempDir(name)
 	err := os.MkdirAll(testdir, 0700)
 	if err != nil {
 		return nil, err
@@ -1006,7 +1013,7 @@ func benchmarkDiskWrites(b *testing.B, numWrites int, pageSize int, numThreads i
 		numWrites, numThreads, pageSize)
 
 	// Get a tmp dir path
-	tmpdir := build.TempDir("wal")
+	tmpdir := tempDir(b.Name())
 
 	// Create dir
 	err := os.MkdirAll(tmpdir, 0700)
@@ -1015,7 +1022,7 @@ func benchmarkDiskWrites(b *testing.B, numWrites int, pageSize int, numThreads i
 	}
 
 	// Create a tmp file
-	f, err := os.Create(tmpdir + "/wal.dat")
+	f, err := os.Create(filepath.Join(tmpdir, "wal.dat"))
 	if err != nil {
 		b.Fatal(err)
 	}

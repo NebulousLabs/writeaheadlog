@@ -12,7 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
 )
 
@@ -130,23 +129,23 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 		// Recover WAL and return updates
 		updates, err := newWal.recoverWal(data)
 		if err != nil {
-			err = build.ComposeErrors(err, newWal.logFile.Close())
+			err = errors.Compose(err, newWal.logFile.Close())
 		}
 		return updates, newWal, err
 
 	} else if !os.IsNotExist(err) {
 		// the file exists but couldn't be opened
-		return nil, nil, build.ExtendErr("walFile was not opened successfully", err)
+		return nil, nil, errors.Extend(err, errors.New("walFile was not opened successfully"))
 	}
 
 	// Create new empty WAL
 	newWal.logFile, err = deps.create(path)
 	if err != nil {
-		return nil, nil, build.ExtendErr("walFile could not be created", err)
+		return nil, nil, errors.Extend(err, errors.New("walFile could not be created"))
 	}
 	// Write the metadata to the WAL
 	if err = writeWALMetadata(newWal.logFile); err != nil {
-		return nil, nil, build.ExtendErr("Failed to write metadata to file", err)
+		return nil, nil, errors.Extend(err, errors.New("Failed to write metadata to file"))
 	}
 	// No recovery needs to be performed.
 	newWal.recoveryComplete = true
@@ -189,7 +188,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 
 	if recoveryState == recoveryStateClean {
 		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
-			return nil, build.ExtendErr("unable to write WAL recovery state", err)
+			return nil, errors.Extend(err, errors.New("unable to write WAL recovery state"))
 		}
 		w.recoveryComplete = true
 		return []Update{}, nil
@@ -202,7 +201,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 			return nil, err
 		}
 		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
-			return nil, build.ExtendErr("unable to write WAL recovery state", err)
+			return nil, errors.Extend(err, errors.New("unable to write WAL recovery state"))
 		}
 		w.recoveryComplete = true
 		return []Update{}, w.logFile.Sync()
@@ -428,7 +427,7 @@ func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint
 
 	// Restore updates from payload
 	if txn.Updates, err = unmarshalUpdates(txnPayload); err != nil {
-		return build.ExtendErr("Unable to unmarshal updates", err)
+		return errors.Extend(err, errors.New("Unable to unmarshal updates"))
 	}
 
 	// Set flags accordingly
