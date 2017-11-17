@@ -123,14 +123,17 @@ func (d *faultyDiskDependency) remove(path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if !d.disabled {
-		fail := fastrand.Intn(int(d.failDenominator)) == 0
-		d.failDenominator++
-		if fail || d.failed || d.failDenominator >= d.writeLimit {
-			d.failed = true
-			return nil
-		}
+	if d.disabled {
+		return os.Remove(path)
 	}
+
+	fail := fastrand.Intn(int(d.failDenominator)) == 0
+	d.failDenominator++
+	if fail || d.failed || d.failDenominator >= d.writeLimit {
+		d.failed = true
+		return nil
+	}
+
 	return os.Remove(path)
 }
 
@@ -147,15 +150,18 @@ func (f *faultyFile) Write(p []byte) (int, error) {
 	f.d.mu.Lock()
 	defer f.d.mu.Unlock()
 
-	if !f.d.disabled {
-		fail := fastrand.Intn(int(f.d.failDenominator)) == 0
-		f.d.failDenominator++
-		if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
-			f.d.failed = true
-			// Write random amount of bytes on failure
-			return f.file.Write(fastrand.Bytes(fastrand.Intn(len(p) + 1)))
-		}
+	if f.d.disabled {
+		return f.file.Write(p)
 	}
+
+	fail := fastrand.Intn(int(f.d.failDenominator)) == 0
+	f.d.failDenominator++
+	if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
+		f.d.failed = true
+		// Write random amount of bytes on failure
+		return f.file.Write(fastrand.Bytes(fastrand.Intn(len(p) + 1)))
+	}
+
 	return f.file.Write(p)
 }
 func (f *faultyFile) Close() error { return f.file.Close() }
@@ -169,14 +175,16 @@ func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	f.d.mu.Lock()
 	defer f.d.mu.Unlock()
 
-	if !f.d.disabled {
-		fail := fastrand.Intn(int(f.d.failDenominator)) == 0
-		f.d.failDenominator++
-		if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
-			f.d.failed = true
-			// Write random amount of bytes on failure
-			return f.file.WriteAt(fastrand.Bytes(fastrand.Intn(len(p)+1)), off)
-		}
+	if f.d.disabled {
+		return f.file.WriteAt(p, off)
+	}
+
+	fail := fastrand.Intn(int(f.d.failDenominator)) == 0
+	f.d.failDenominator++
+	if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
+		f.d.failed = true
+		// Write random amount of bytes on failure
+		return f.file.WriteAt(fastrand.Bytes(fastrand.Intn(len(p)+1)), off)
 	}
 	return f.file.WriteAt(p, off)
 }
