@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
 	"github.com/NebulousLabs/fastrand"
 	"golang.org/x/crypto/blake2b"
@@ -287,7 +286,7 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 	// Reload wal.
 	updates, wal, err := newWal(walPath, deps)
 	if err != nil {
-		return build.ExtendErr("failed to reload WAL", err)
+		return errors.Extend(errors.New("failed to reload WAL"), err)
 	}
 	defer func() {
 		if err != nil {
@@ -301,7 +300,7 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 		var su siloUpdate
 		su.unmarshal(update.Instructions)
 		if err := su.applyUpdate(silos[su.silo], testdir); err != nil {
-			return build.ExtendErr("Failed to apply update", err)
+			return errors.Extend(errors.New("Failed to apply update"), err)
 		}
 		// Remember new checksums to be able to remove unnecessary setup files
 		// later
@@ -310,20 +309,20 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 
 	// Sync the applied updates
 	if err := file.Sync(); err != nil {
-		return build.ExtendErr("Failed to sync database", err)
+		return errors.Extend(errors.New("Failed to sync database"), err)
 	}
 
 	// Remove unnecessary setup files
 	files, err := ioutil.ReadDir(testdir)
 	if err != nil {
-		return build.ExtendErr("Failed to get list of files in testdir", err)
+		return errors.Extend(errors.New("Failed to get list of files in testdir"), err)
 	}
 	for _, f := range files {
 		_, exists := checksums[f.Name()]
 		if len(f.Name()) == 32 && !exists {
 			if err := deps.remove(filepath.Join(testdir, f.Name())); err != nil && !os.IsNotExist(err) {
 
-				return build.ExtendErr("Failed to remove setup file", err)
+				return errors.Extend(errors.New("Failed to remove setup file"), err)
 			}
 		}
 	}
@@ -337,10 +336,10 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 
 		// Read numbers and checksum
 		if _, err := silo.f.ReadAt(numbers, silo.offset); err != nil {
-			return build.ExtendErr("Failed to read numbers of silo", err)
+			return errors.Extend(errors.New("Failed to read numbers of silo"), err)
 		}
 		if _, err := silo.f.ReadAt(cs[:], silo.offset+int64(4*len(silo.numbers))); err != nil {
-			return build.ExtendErr("Failed to read checksum of silo", err)
+			return errors.Extend(errors.New("Failed to read checksum of silo"), err)
 		}
 
 		// The checksum should match
@@ -351,12 +350,12 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 	}
 
 	if err := wal.RecoveryComplete(); err != nil {
-		return build.ExtendErr("Failed to signal completed recovery: %v", err)
+		return errors.Extend(errors.New("Failed to signal completed recovery"), err)
 	}
 
 	// Close the wal
 	if err := wal.Close(); err != nil {
-		return build.ExtendErr("Failed to close WAL", err)
+		return errors.Extend(errors.New("Failed to close WAL"), err)
 	}
 	return nil
 }
@@ -369,7 +368,7 @@ func TestSilo(t *testing.T) {
 	}
 
 	deps := newFaultyDiskDependency(5000)
-	testdir := build.TempDir("wal", t.Name())
+	testdir := tempDir("wal", t.Name())
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
 
@@ -455,7 +454,7 @@ func TestSilo(t *testing.T) {
 		*deps.writeLimit = math.MaxUint64
 
 		// Repeatedly try to recover WAL
-		err = build.Retry(numRetries, time.Millisecond, func() error {
+		err = retry(numRetries, time.Millisecond, func() error {
 			counters[cntr]++
 			// Reset failed and try again
 			deps.mu.Lock()

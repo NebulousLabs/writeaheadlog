@@ -22,6 +22,21 @@ func tempDir(dirs ...string) string {
 	return path
 }
 
+// retry will call 'fn' 'tries' times, waiting 'durationBetweenAttempts'
+// between each attempt, returning 'nil' the first time that 'fn' returns nil.
+// If 'nil' is never returned, then the final error returned by 'fn' is
+// returned.
+func retry(tries int, durationBetweenAttempts time.Duration, fn func() error) (err error) {
+	for i := 1; i < tries; i++ {
+		err = fn()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(durationBetweenAttempts)
+	}
+	return fn()
+}
+
 //dependencyUncleanShutdown prevnts the wal from marking the logfile as clean
 //upon shutdown
 type dependencyUncleanShutdown struct {
