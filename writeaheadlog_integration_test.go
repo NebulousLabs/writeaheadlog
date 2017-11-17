@@ -1,5 +1,8 @@
 package writeaheadlog
 
+// TODO: Make it so that not every update changes the silo data. That will
+// probably make the test run a lot faster overall.
+
 import (
 	"bytes"
 	"encoding/binary"
@@ -18,36 +21,43 @@ import (
 )
 
 type (
+	// A silo is a simulated group of data that requires using the full
+	// featureset of the wal for maximum performance. The silo is a list of
+	// numbers followed by a checksum. The numbers form a ring (the first
+	// number follows the last number) that has strictly increasing values,
+	// except for one place within the ring where the next number is smaller
+	// than the previous.
+	//
+	// The checksum is the checksum of the silo data plus some external data.
+	// The external data exists in a file with the same name as checksum. The
+	// external data should always be available if the silo exists. There
+	// should also be exactly one external file per file and not more if the
+	// full database is intact and has been consistently managed.
 	silo struct {
-		// list of numbers in silo and the index of the next number that will
-		// be incremented
-		numbers    []uint32
+		// List of numbers in silo and the index of the next number that will
+		// be incremented.
 		nextNumber uint32
+		numbers    []uint32
 
+		// Utilities
+		deps   dependencies
 		f      file  // database file holding silo
 		offset int64 // offset within database
-		deps   dependencies
 	}
 
+	// A siloUpdate contains an update to the silo. There is a number that
+	// needs to be written (it's the smallest number in the silo), as well as
+	// an update to the checksum because the blob file associated with the silo
+	// has changed.
 	siloUpdate struct {
-		// offset is the in the file at which the number should be written
-		offset int64
+		offset int64  // Location in the file where we need to write a number.
+		number uint32 // The number we need to write.
+		silo   int64  // Offset of the sile  within the file.
 
-		// number is the number which is written at offset
-		number uint32
-
-		// silo is the offset of the silo so we can apply the update to the right silo
-		silo int64
-
-		// oldChecksum is the checksum of the file that became obsolete after changing a
-		// number. It needs to be removed when the update is applied.
-		oldChecksum checksum
-
-		// newChecksum is the new checkum of the silo and the corresponding file
-		newChecksum checksum
-
-		// ncso is the offset of the new checksum
-		newChecksumOffset int64
+		// Datafile checksum management.
+		prevChecksum   checksum // Need to remove the corresponding file.
+		newChecksum    checksum // Need to write the new checksum. File already exists.
+		checksumOffset int64    // Location to write the checksum.
 	}
 )
 
@@ -72,8 +82,8 @@ func (su siloUpdate) marshal() []byte {
 	binary.LittleEndian.PutUint64(data[0:8], uint64(su.offset))
 	binary.LittleEndian.PutUint32(data[8:12], su.number)
 	binary.LittleEndian.PutUint64(data[12:20], uint64(su.silo))
-	binary.LittleEndian.PutUint64(data[20:28], uint64(su.newChecksumOffset))
-	copy(data[28:28+checksumSize], su.oldChecksum[:])
+	binary.LittleEndian.PutUint64(data[20:28], uint64(su.checksumOffset))
+	copy(data[28:28+checksumSize], su.prevChecksum[:])
 	copy(data[28+checksumSize:], su.newChecksum[:])
 	return data
 }
@@ -86,8 +96,8 @@ func (su *siloUpdate) unmarshal(data []byte) {
 	su.offset = int64(binary.LittleEndian.Uint64(data[0:8]))
 	su.number = binary.LittleEndian.Uint32(data[8:12])
 	su.silo = int64(binary.LittleEndian.Uint64(data[12:20]))
-	su.newChecksumOffset = int64(binary.LittleEndian.Uint64(data[20:28]))
-	copy(su.oldChecksum[:], data[28:28+checksumSize])
+	su.checksumOffset = int64(binary.LittleEndian.Uint64(data[20:28]))
+	copy(su.prevChecksum[:], data[28:28+checksumSize])
 	copy(su.newChecksum[:], data[28+checksumSize:])
 	return
 }
@@ -105,11 +115,11 @@ func (su *siloUpdate) newUpdate() Update {
 // newSiloUpdate creates a new Silo update for a number at a specific index
 func (s *silo) newSiloUpdate(index uint32, number uint32, ocs checksum) *siloUpdate {
 	return &siloUpdate{
-		number:            number,
-		offset:            s.offset + int64(4*(index)),
-		silo:              s.offset,
-		oldChecksum:       ocs,
-		newChecksumOffset: s.offset + int64(len(s.numbers)*4),
+		number:         number,
+		offset:         s.offset + int64(4*(index)),
+		silo:           s.offset,
+		prevChecksum:   ocs,
+		checksumOffset: s.offset + int64(len(s.numbers)*4),
 	}
 }
 
@@ -139,13 +149,13 @@ func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 	}
 
 	// Write new checksum
-	_, err = silo.f.WriteAt(su.newChecksum[:], su.newChecksumOffset)
+	_, err = silo.f.WriteAt(su.newChecksum[:], su.checksumOffset)
 	if err != nil {
 		return err
 	}
 
 	// Delete old data file if it still exists
-	err = silo.deps.remove(filepath.Join(dataPath, hex.EncodeToString(su.oldChecksum[:])))
+	err = silo.deps.remove(filepath.Join(dataPath, hex.EncodeToString(su.prevChecksum[:])))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
