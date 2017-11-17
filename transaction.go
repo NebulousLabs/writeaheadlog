@@ -336,7 +336,7 @@ func (t *Transaction) append(updates []Update) (err error) {
 			// Write last page
 			b := lastPage.appendTo(buf[:0])
 			_, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset))
-			err = errors.Compose(err, errors.Extend(err, errors.New("Writing the last page to disk failed")), t.wal.logFile.Sync())
+			err = errors.Compose(err, errors.Extend(err, errors.New("Writing the last page to disk failed")))
 		}
 	}()
 
@@ -356,9 +356,6 @@ func (t *Transaction) append(updates []Update) (err error) {
 		if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
 			return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 		}
-		if err := t.wal.logFile.Sync(); err != nil {
-			return errors.Extend(err, errors.New("Syncing the last page failed"))
-		}
 		return nil
 	}
 
@@ -366,22 +363,16 @@ func (t *Transaction) append(updates []Update) (err error) {
 	pages := t.wal.managedReservePages(data)
 	lastPage.nextPage = &pages[0]
 
-	// Write the new pages to disk and sync them
+	// Write the new pages to disk
 	for _, page := range pages {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
 			return errors.Extend(err, errors.New("Writing the page to disk failed"))
 		}
 	}
-	if err := t.wal.fSync(); err != nil {
-		return errors.Extend(err, errors.New("Writing the new pages to disk failed"))
-	}
-	// Link the new pages to the last one and sync the last page
+	// Link the new pages to the last one
 	b := lastPage.appendTo(buf[:0])
 	if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
-		return errors.Extend(err, errors.New("Writing the last page to disk failed"))
-	}
-	if err := t.wal.fSync(); err != nil {
 		return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 	}
 
