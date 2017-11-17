@@ -171,7 +171,7 @@ func readWALMetadata(data []byte) (uint16, error) {
 	// Determine and return the current status of the file.
 	fileState := uint16(data[len(metadataHeader)+len(metadataVersion)])
 	if fileState <= 0 || fileState > 3 {
-		return 0, errors.New("file has an invalid/incorrect state")
+		fileState = recoveryStateUnclean
 	}
 	return fileState, nil
 }
@@ -188,6 +188,10 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 	}
 
 	if recoveryState == recoveryStateClean {
+		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
+			return nil, build.ExtendErr("unable to write WAL recovery state", err)
+		}
+		w.recoveryComplete = true
 		return []Update{}, nil
 	}
 
@@ -197,12 +201,10 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 		if err := w.wipeWAL(); err != nil {
 			return nil, err
 		}
-		if err := w.logFile.Sync(); err != nil {
-			return nil, err
-		}
 		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
-			return nil, err
+			return nil, build.ExtendErr("unable to write WAL recovery state", err)
 		}
+		w.recoveryComplete = true
 		return []Update{}, w.logFile.Sync()
 	}
 
