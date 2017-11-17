@@ -141,6 +141,21 @@ func (d *faultyDiskDependency) remove(path string) error {
 	return os.Remove(path)
 }
 
+// scrambleData takes some data as input and replaces parts of it randomly with
+// random data
+func scrambleData(d []byte) []byte {
+	randomData := fastrand.Bytes(len(d))
+	scrambled := make([]byte, len(d), len(d))
+	for i := 0; i < len(d); i++ {
+		if fastrand.Intn(4) == 0 { // 25% chance to replace byte
+			scrambled[i] = randomData[i]
+		} else {
+			scrambled[i] = d[i]
+		}
+	}
+	return scrambled
+}
+
 // faultyFile implements a file that simulates a faulty disk.
 type faultyFile struct {
 	d    *faultyDiskDependency
@@ -162,10 +177,9 @@ func (f *faultyFile) Write(p []byte) (int, error) {
 	f.d.failDenominator++
 	if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
 		f.d.failed = true
-		// Write random amount of bytes on failure
-		return f.file.Write(fastrand.Bytes(fastrand.Intn(len(p) + 1)))
+		// scramble data
+		return f.file.Write(scrambleData(p))
 	}
-
 	return f.file.Write(p)
 }
 func (f *faultyFile) Close() error { return f.file.Close() }
@@ -187,8 +201,8 @@ func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	f.d.failDenominator++
 	if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
 		f.d.failed = true
-		// Write random amount of bytes on failure
-		return f.file.WriteAt(fastrand.Bytes(fastrand.Intn(len(p)+1)), off)
+		// scramble data
+		return f.file.WriteAt(scrambleData(p), off)
 	}
 	return f.file.WriteAt(p, off)
 }
