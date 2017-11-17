@@ -303,7 +303,7 @@ func (t *Transaction) SignalUpdatesApplied() error {
 
 // append is a helper function to append updates to a transaction on which
 // SignalSetupComplete hasn't been called yet
-func (t *Transaction) append(updates []Update) error {
+func (t *Transaction) append(updates []Update) (err error) {
 	// If there is nothing to append we are done
 	if len(updates) == 0 {
 		return nil
@@ -324,6 +324,22 @@ func (t *Transaction) append(updates []Update) error {
 		lastPage = lastPage.nextPage
 	}
 
+	// Preserve the original payload of the last page and the original updates
+	// of the transaction if an error occurs
+	buf := make([]byte, pageSize)
+	defer func() {
+		if err != nil {
+			lastPage.payload = lastPage.payload[:len(lastPage.payload)]
+			t.Updates = t.Updates[:len(t.Updates)]
+			lastPage.nextPage = nil
+
+			// Write last page
+			b := lastPage.appendTo(buf[:0])
+			_, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset))
+			err = errors.Compose(err, errors.Extend(err, errors.New("Writing the last page to disk failed")), t.wal.logFile.Sync())
+		}
+	}()
+
 	// Write as much data to the last page as possible
 	lenDiff := MaxPayloadSize - len(lastPage.payload)
 	if len(data) <= lenDiff {
@@ -334,8 +350,15 @@ func (t *Transaction) append(updates []Update) error {
 		data = data[lenDiff:]
 	}
 
-	// If there is no more data to write we are done
+	// If there is no more data we only have to update the last page on disk
 	if data == nil {
+		b := lastPage.appendTo(buf[:0])
+		if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
+			return errors.Extend(err, errors.New("Writing the last page to disk failed"))
+		}
+		if err := t.wal.logFile.Sync(); err != nil {
+			return errors.Extend(err, errors.New("Syncing the last page failed"))
+		}
 		return nil
 	}
 
@@ -344,7 +367,6 @@ func (t *Transaction) append(updates []Update) error {
 	lastPage.nextPage = &pages[0]
 
 	// Write the new pages to disk and sync them
-	buf := make([]byte, pageSize)
 	for _, page := range pages {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
