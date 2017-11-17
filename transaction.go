@@ -3,6 +3,7 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 	"sync/atomic"
 
 	"github.com/NebulousLabs/errors"
@@ -88,11 +89,18 @@ type Transaction struct {
 	initErr error
 }
 
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, pageSize)
+	},
+}
+
 // checksum calculates the checksum of a transaction excluding the checksum
 // field of each page
 func (t Transaction) checksum() (c checksum) {
 	h, _ := blake2b.New256(nil)
-	buf := make([]byte, pageSize)
+	buf := bufPool.Get().([]byte)
+	defer bufPool.Put(buf)
 	for page := t.firstPage; page != nil; page = page.nextPage {
 		b := page.appendTo(buf[:0])
 		h.Write(b[checksumSize:]) // exclude checksum
@@ -102,15 +110,11 @@ func (t Transaction) checksum() (c checksum) {
 }
 
 // commit commits a transaction by setting the correct status and checksum
-func (t *Transaction) commit(done chan error) {
-	// Signal completion of the commit
-	defer close(done)
-
+func (t *Transaction) commit() error {
 	// Make sure that the initialization of the transaction finished
 	<-t.initComplete
 	if t.initErr != nil {
-		done <- t.initErr
-		return
+		return t.initErr
 	}
 
 	// set the status of the first page first
@@ -126,20 +130,20 @@ func (t *Transaction) commit(done chan error) {
 	// there have been no errors so far.
 	if t.wal.deps.disrupt("CommitFail") {
 		// Disk failure causes the commit to fail
-		done <- errors.New("Write failed on purpose")
-		return
+		return errors.New("Write failed on purpose")
 	}
-	if _, err := t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset)); err != nil {
-		done <- errors.Extend(err, errors.New("Writing the first page failed"))
-		return
+	buf := bufPool.Get().([]byte)
+	_, err := t.wal.logFile.WriteAt(t.firstPage.appendTo(buf[:0]), int64(t.firstPage.offset))
+	bufPool.Put(buf)
+	if err != nil {
+		return errors.Extend(err, errors.New("Writing the first page failed"))
 	}
-
 	if err := t.wal.fSync(); err != nil {
-		done <- errors.Extend(err, errors.New("Writing the first page failed"))
-		return
+		return errors.Extend(err, errors.New("Writing the first page failed"))
 	}
 
 	t.commitComplete = true
+	return nil
 }
 
 // marshalUpdates marshals the updates of a transaction
@@ -270,7 +274,9 @@ func (t *Transaction) SignalUpdatesApplied() error {
 		// Disk failure causes the commit to fail
 		err = errors.New("Write failed on purpose")
 	} else {
-		_, err = t.wal.logFile.WriteAt(t.firstPage.appendTo(nil), int64(t.firstPage.offset))
+		buf := bufPool.Get().([]byte)
+		_, err = t.wal.logFile.WriteAt(t.firstPage.appendTo(buf[:0]), int64(t.firstPage.offset))
+		bufPool.Put(buf)
 	}
 	if err != nil {
 		return errors.Extend(err, errors.New("Couldn't write the page to file"))
@@ -297,19 +303,16 @@ func (t *Transaction) SignalUpdatesApplied() error {
 
 // append is a helper function to append updates to a transaction on which
 // SignalSetupComplete hasn't been called yet
-func (t *Transaction) append(updates []Update, done chan error) {
-	defer close(done)
-
+func (t *Transaction) append(updates []Update) error {
 	// If there is nothing to append we are done
 	if len(updates) == 0 {
-		return
+		return nil
 	}
 
 	// Make sure that the initialization finished
 	<-t.initComplete
 	if t.initErr != nil {
-		done <- t.initErr
-		return
+		return t.initErr
 	}
 
 	// Marshal the data
@@ -333,7 +336,7 @@ func (t *Transaction) append(updates []Update, done chan error) {
 
 	// If there is no more data to write we are done
 	if data == nil {
-		return
+		return nil
 	}
 
 	// Get enough pages for the remaining data
@@ -345,28 +348,24 @@ func (t *Transaction) append(updates []Update, done chan error) {
 	for _, page := range pages {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
-			done <- errors.Extend(err, errors.New("Writing the page to disk failed"))
-			return
+			return errors.Extend(err, errors.New("Writing the page to disk failed"))
 		}
 	}
 	if err := t.wal.fSync(); err != nil {
-		done <- errors.Extend(err, errors.New("Writing the new pages to disk failed"))
-		return
+		return errors.Extend(err, errors.New("Writing the new pages to disk failed"))
 	}
-
 	// Link the new pages to the last one and sync the last page
 	b := lastPage.appendTo(buf[:0])
 	if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
-		done <- errors.Extend(err, errors.New("Writing the last page to disk failed"))
-		return
+		return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 	}
 	if err := t.wal.fSync(); err != nil {
-		done <- errors.Extend(err, errors.New("Writing the last page to disk failed"))
-		return
+		return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 	}
 
 	// Append the updates to the transaction
 	t.Updates = append(t.Updates, updates...)
+	return nil
 }
 
 // Append appends additional updates to a transaction
@@ -378,7 +377,9 @@ func (t *Transaction) Append(updates []Update) <-chan error {
 		return done
 	}
 
-	go t.append(updates, done)
+	go func() {
+		done <- t.append(updates)
+	}()
 	return done
 }
 
@@ -395,7 +396,9 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 	t.setupComplete = true
 
 	// Commit the transaction non-blocking
-	go t.commit(done)
+	go func() {
+		done <- t.commit()
+	}()
 	return done
 }
 
@@ -428,7 +431,8 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 
 // writeToFile writes all the pages of the transaction to disk
 func (t *Transaction) writeToFile() error {
-	buf := make([]byte, pageSize)
+	buf := bufPool.Get().([]byte)
+	defer bufPool.Put(buf)
 	for page := t.firstPage; page != nil; page = page.nextPage {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
