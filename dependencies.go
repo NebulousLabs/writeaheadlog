@@ -113,6 +113,10 @@ func (d *faultyDiskDependency) openFile(path string, flag int, perm os.FileMode)
 	return d.newFaultyFile(f), nil
 }
 func (d *faultyDiskDependency) create(path string) (file, error) {
+	if d.failed {
+		return nil, errors.New("failed to create file (faulty disk)")
+	}
+
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
