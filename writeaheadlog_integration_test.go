@@ -242,7 +242,7 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 		}
 
 		// Append the remaining updates
-		if err := txn.Append(updates[appendFrom:]); err != nil {
+		if err := <-txn.Append(updates[appendFrom:]); err != nil {
 			return
 		}
 
@@ -384,7 +384,7 @@ func TestSilo(t *testing.T) {
 	numSilos := int64(250)
 	numIncrease := 20
 	maxCntr := 50
-	numRetries := 1000
+	numRetries := 100
 	counters := make([]int, maxCntr, maxCntr)
 	endTime := time.Now().Add(5 * time.Minute)
 	iters := 0
