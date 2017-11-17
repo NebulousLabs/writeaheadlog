@@ -171,7 +171,7 @@ func readWALMetadata(data []byte) (uint16, error) {
 	// Determine and return the current status of the file.
 	fileState := uint16(data[len(metadataHeader)+len(metadataVersion)])
 	if fileState <= 0 || fileState > 3 {
-		return 0, errors.New("file has an invalid/incorrect state")
+		fileState = recoveryStateUnclean
 	}
 	return fileState, nil
 }
