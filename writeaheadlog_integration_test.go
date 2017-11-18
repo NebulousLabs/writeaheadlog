@@ -52,7 +52,7 @@ type (
 	siloUpdate struct {
 		offset int64  // Location in the file where we need to write a number.
 		number uint32 // The number we need to write.
-		silo   int64  // Offset of the sile  within the file.
+		silo   int64  // Offset of the silo within the file.
 
 		// Datafile checksum management.
 		prevChecksum   checksum // Need to remove the corresponding file.
