@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -857,7 +858,9 @@ func TestTransactionAppend(t *testing.T) {
 // benchmarkTransactionSpeed is a helper function to create benchmarks that run
 // for 1 min to find out how many transactions can be applied to the wal and
 // how large the wal grows during that time using a certain number of threads.
-func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
+// When appendUpdate is set to 'true', a second update will be appended to the
+// transaction before it is committed.
+func benchmarkTransactionSpeed(b *testing.B, numThreads int, appendUpdate bool) {
 	b.Logf("Running benchmark with %v threads", numThreads)
 
 	wt, err := newWALTester(b.Name(), &prodDependencies{})
@@ -883,6 +886,12 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 		txn, err := wt.wal.NewTransaction(updates)
 		if err != nil {
 			return
+		}
+		// Append second update
+		if appendUpdate {
+			if err = <-txn.Append(updates); err != nil {
+				return
+			}
 		}
 		// Wait for the txn to be committed
 		if err = <-txn.SignalSetupComplete(); err != nil {
@@ -975,50 +984,26 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 
 }
 
-// BenchmarkTransactionSpeed1 runs benchmarkTransactionSpeed with 1
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 15.5  , 125.49, 09/17/2017
-// MZVLW512HMJP, 175.28, 15.4  , 09/17/2017
-//
-func BenchmarkTransactionSpeed1(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1)
+// BenchmarkTransactionSpeedAppend runs benchmarkTransactionSpeed with append =
+// false
+func BenchmarkTransactionSpeed(b *testing.B) {
+	numThreads := []int{1, 10, 100, 1000}
+	for _, n := range numThreads {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			benchmarkTransactionSpeed(b, n, false)
+		})
+	}
 }
 
-// BenchmarkTransactionSpeed10 runs benchmarkTransactionSpeed with 10
-// threads
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 140.6  , 125.86, 09/17/2017
-// MZVLW512HMJP, 1437.35, 18.07 , 09/17/2017
-//
-func BenchmarkTransactionSpeed10(b *testing.B) {
-	benchmarkTransactionSpeed(b, 10)
-}
-
-// BenchmarkTransactionSpeed100 runs benchmarkTransactionSpeed with 100
-// threads
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 1285   , 209.37, 09/17/2017
-// MZVLW512HMJP, 7589.93, 160.18, 09/17/2017
-//
-func BenchmarkTransactionSpeed100(b *testing.B) {
-	benchmarkTransactionSpeed(b, 100)
-}
-
-// BenchmarkTransactionSpeed1000 runs benchmarkTransactionSpeed with 1000
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 3486   , 461.38, 09/17/2017
-// MZVLW512HMJP, 6101.05, 1479.8, 09/17/2017
-//
-func BenchmarkTransactionSpeed1000(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1000)
+// BenchmarkTransactionSpeedAppend runs benchmarkTransactionSpeed with append =
+// true
+func BenchmarkTransactionSpeedAppend(b *testing.B) {
+	numThreads := []int{1, 10, 100, 1000}
+	for _, n := range numThreads {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			benchmarkTransactionSpeed(b, n, true)
+		})
+	}
 }
 
 // benchmarkDiskWrites writes numThreads pages of pageSize size and spins up 1
