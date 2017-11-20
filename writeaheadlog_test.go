@@ -15,14 +15,6 @@ import (
 	"github.com/NebulousLabs/fastrand"
 )
 
-// tempDir joins the provided directories and prefixes them with the testing
-// directory.
-func tempDir(dirs ...string) string {
-	path := filepath.Join(os.TempDir(), "wal", filepath.Join(dirs...))
-	os.RemoveAll(path) // remove old test data
-	return path
-}
-
 // retry will call 'fn' 'tries' times, waiting 'durationBetweenAttempts'
 // between each attempt, returning 'nil' the first time that 'fn' returns nil.
 // If 'nil' is never returned, then the final error returned by 'fn' is
@@ -38,33 +30,12 @@ func retry(tries int, durationBetweenAttempts time.Duration, fn func() error) (e
 	return fn()
 }
 
-//dependencyUncleanShutdown prevnts the wal from marking the logfile as clean
-//upon shutdown
-type dependencyUncleanShutdown struct {
-	prodDependencies
-}
-
-func (dependencyUncleanShutdown) disrupt(s string) bool {
-	if s == "UncleanShutdown" {
-		return true
-	}
-	return false
-}
-
-// dependencyRecoveryFail causes the RecoveryComplete function to fail after
-// the metadata was changed to wipe
-type dependencyRecoveryFail struct {
-	prodDependencies
-}
-
-func (dependencyRecoveryFail) disrupt(s string) bool {
-	if s == "RecoveryFail" {
-		return true
-	}
-	if s == "UncleanShutdown" {
-		return true
-	}
-	return false
+// tempDir joins the provided directories and prefixes them with the testing
+// directory.
+func tempDir(dirs ...string) string {
+	path := filepath.Join(os.TempDir(), "wal", filepath.Join(dirs...))
+	os.RemoveAll(path) // remove old test data
+	return path
 }
 
 // walTester holds a WAL along with some other fields
