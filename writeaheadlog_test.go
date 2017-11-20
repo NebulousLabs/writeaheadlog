@@ -857,7 +857,9 @@ func TestTransactionAppend(t *testing.T) {
 // benchmarkTransactionSpeed is a helper function to create benchmarks that run
 // for 1 min to find out how many transactions can be applied to the wal and
 // how large the wal grows during that time using a certain number of threads.
-func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
+// When appendUpdate is set to 'true', a second update will be appended to the
+// transaction before it is committed.
+func benchmarkTransactionSpeed(b *testing.B, numThreads int, appendUpdate bool) {
 	b.Logf("Running benchmark with %v threads", numThreads)
 
 	wt, err := newWALTester(b.Name(), &prodDependencies{})
@@ -883,6 +885,12 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 		txn, err := wt.wal.NewTransaction(updates)
 		if err != nil {
 			return
+		}
+		// Append second update
+		if appendUpdate {
+			if err = <-txn.Append(updates); err != nil {
+				return
+			}
 		}
 		// Wait for the txn to be committed
 		if err = <-txn.SignalSetupComplete(); err != nil {
@@ -983,7 +991,7 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 // MZVLW512HMJP, 175.28, 15.4  , 09/17/2017
 //
 func BenchmarkTransactionSpeed1(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1)
+	benchmarkTransactionSpeed(b, 1, false)
 }
 
 // BenchmarkTransactionSpeed10 runs benchmarkTransactionSpeed with 10
@@ -995,7 +1003,7 @@ func BenchmarkTransactionSpeed1(b *testing.B) {
 // MZVLW512HMJP, 1437.35, 18.07 , 09/17/2017
 //
 func BenchmarkTransactionSpeed10(b *testing.B) {
-	benchmarkTransactionSpeed(b, 10)
+	benchmarkTransactionSpeed(b, 10, false)
 }
 
 // BenchmarkTransactionSpeed100 runs benchmarkTransactionSpeed with 100
@@ -1007,7 +1015,7 @@ func BenchmarkTransactionSpeed10(b *testing.B) {
 // MZVLW512HMJP, 7589.93, 160.18, 09/17/2017
 //
 func BenchmarkTransactionSpeed100(b *testing.B) {
-	benchmarkTransactionSpeed(b, 100)
+	benchmarkTransactionSpeed(b, 100, false)
 }
 
 // BenchmarkTransactionSpeed1000 runs benchmarkTransactionSpeed with 1000
@@ -1018,7 +1026,47 @@ func BenchmarkTransactionSpeed100(b *testing.B) {
 // MZVLW512HMJP, 6101.05, 1479.8, 09/17/2017
 //
 func BenchmarkTransactionSpeed1000(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1000)
+	benchmarkTransactionSpeed(b, 1000, false)
+}
+
+// BenchmarkTransactionSpeedAppend1 runs benchmarkTransactionSpeed with 1 and
+// calls txn.Append
+//
+// Results (Model, txn/s, maxLatency(ms), date)
+//
+//
+func BenchmarkTransactionSpeedAppend1(b *testing.B) {
+	benchmarkTransactionSpeed(b, 1, true)
+}
+
+// BenchmarkTransactionSpeedAppend10 runs benchmarkTransactionSpeed with 10 and
+// calls txn.Append
+//
+// Results (Model, txn/s, maxLatency(ms), date)
+//
+//
+func BenchmarkTransactionSpeedAppend10(b *testing.B) {
+	benchmarkTransactionSpeed(b, 10, true)
+}
+
+// BenchmarkTransactionSpeedAppend100 runs benchmarkTransactionSpeed with 100
+// and calls txn.Append
+//
+// Results (Model, txn/s, maxLatency(ms), date)
+//
+//
+func BenchmarkTransactionSpeedAppend100(b *testing.B) {
+	benchmarkTransactionSpeed(b, 100, true)
+}
+
+// BenchmarkTransactionSpeedAppend1000 runs benchmarkTransactionSpeed with 1000
+// and calls txn.Append
+//
+// Results (Model, txn/s, maxLatency(ms), date)
+//
+//
+func BenchmarkTransactionSpeedAppend1000(b *testing.B) {
+	benchmarkTransactionSpeed(b, 1000, true)
 }
 
 // benchmarkDiskWrites writes numThreads pages of pageSize size and spins up 1
