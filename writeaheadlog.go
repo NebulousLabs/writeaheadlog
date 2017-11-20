@@ -58,6 +58,9 @@ type WAL struct {
 	// stopChan is a channel that is used to signal a shutdown
 	stopChan chan struct{}
 
+	// syncing indicates if the syncing thread is currently being executed
+	syncing bool
+
 	// syncErr is the error returned by the most recent fsync call
 	syncErr error
 
