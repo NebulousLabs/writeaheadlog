@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -983,90 +984,26 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int, appendUpdate bool) 
 
 }
 
-// BenchmarkTransactionSpeed1 runs benchmarkTransactionSpeed with 1
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 15.5  , 125.49, 09/17/2017
-// MZVLW512HMJP, 175.28, 15.4  , 09/17/2017
-//
-func BenchmarkTransactionSpeed1(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1, false)
+// BenchmarkTransactionSpeedAppend runs benchmarkTransactionSpeed with append =
+// false
+func BenchmarkTransactionSpeed(b *testing.B) {
+	numThreads := []int{1, 10, 100, 1000}
+	for _, n := range numThreads {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			benchmarkTransactionSpeed(b, n, false)
+		})
+	}
 }
 
-// BenchmarkTransactionSpeed10 runs benchmarkTransactionSpeed with 10
-// threads
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 140.6  , 125.86, 09/17/2017
-// MZVLW512HMJP, 1437.35, 18.07 , 09/17/2017
-//
-func BenchmarkTransactionSpeed10(b *testing.B) {
-	benchmarkTransactionSpeed(b, 10, false)
-}
-
-// BenchmarkTransactionSpeed100 runs benchmarkTransactionSpeed with 100
-// threads
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 1285   , 209.37, 09/17/2017
-// MZVLW512HMJP, 7589.93, 160.18, 09/17/2017
-//
-func BenchmarkTransactionSpeed100(b *testing.B) {
-	benchmarkTransactionSpeed(b, 100, false)
-}
-
-// BenchmarkTransactionSpeed1000 runs benchmarkTransactionSpeed with 1000
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 3486   , 461.38, 09/17/2017
-// MZVLW512HMJP, 6101.05, 1479.8, 09/17/2017
-//
-func BenchmarkTransactionSpeed1000(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1000, false)
-}
-
-// BenchmarkTransactionSpeedAppend1 runs benchmarkTransactionSpeed with 1 and
-// calls txn.Append
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-//
-func BenchmarkTransactionSpeedAppend1(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1, true)
-}
-
-// BenchmarkTransactionSpeedAppend10 runs benchmarkTransactionSpeed with 10 and
-// calls txn.Append
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-//
-func BenchmarkTransactionSpeedAppend10(b *testing.B) {
-	benchmarkTransactionSpeed(b, 10, true)
-}
-
-// BenchmarkTransactionSpeedAppend100 runs benchmarkTransactionSpeed with 100
-// and calls txn.Append
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-//
-func BenchmarkTransactionSpeedAppend100(b *testing.B) {
-	benchmarkTransactionSpeed(b, 100, true)
-}
-
-// BenchmarkTransactionSpeedAppend1000 runs benchmarkTransactionSpeed with 1000
-// and calls txn.Append
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-//
-func BenchmarkTransactionSpeedAppend1000(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1000, true)
+// BenchmarkTransactionSpeedAppend runs benchmarkTransactionSpeed with append =
+// true
+func BenchmarkTransactionSpeedAppend(b *testing.B) {
+	numThreads := []int{1, 10, 100, 1000}
+	for _, n := range numThreads {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			benchmarkTransactionSpeed(b, n, true)
+		})
+	}
 }
 
 // benchmarkDiskWrites writes numThreads pages of pageSize size and spins up 1
