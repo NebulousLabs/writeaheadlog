@@ -335,7 +335,7 @@ func (t *Transaction) SignalUpdatesApplied() error {
 
 // append is a helper function to append updates to a transaction on which
 // SignalSetupComplete hasn't been called yet
-func (t *Transaction) append(updates []Update) error {
+func (t *Transaction) append(updates []Update) (err error) {
 	// If there is nothing to append we are done
 	if len(updates) == 0 {
 		return nil
@@ -355,6 +355,26 @@ func (t *Transaction) append(updates []Update) error {
 	for lastPage.nextPage != nil {
 		lastPage = lastPage.nextPage
 	}
+
+	// Preserve the original payload of the last page and the original updates
+	// of the transaction if an error occurs
+	defer func() {
+		if err != nil {
+			lastPage.payload = lastPage.payload[:len(lastPage.payload)]
+			t.Updates = t.Updates[:len(t.Updates)]
+			lastPage.nextPage = nil
+
+			// Write last page
+			offset := lastPage.offset
+			if lastPage == t.firstPage {
+				offset += firstPageMetaSize - pageMetaSize
+			}
+			buf := bufPool.Get().([]byte)
+			_, err := t.wal.logFile.WriteAt(lastPage.appendTo(buf[:0]), int64(offset))
+			bufPool.Put(buf)
+			err = errors.Compose(err, errors.Extend(err, errors.New("Writing the last page to disk failed")))
+		}
+	}()
 
 	// Write as much data to the last page as possible
 	var lenDiff int
@@ -382,9 +402,6 @@ func (t *Transaction) append(updates []Update) error {
 		if err != nil {
 			return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 		}
-		if err := t.wal.fSync(); err != nil {
-			return errors.Extend(err, errors.New("Writing the last page to disk failed"))
-		}
 		t.Updates = append(t.Updates, updates...)
 		return nil
 	}
@@ -395,7 +412,6 @@ func (t *Transaction) append(updates []Update) error {
 	// Write the new pages, then write the tail page that links to them.
 	// Writing in this order ensures that if writing the new pages fails, the
 	// old tail page remains valid.
-
 	buf := bufPool.Get().([]byte)
 	defer bufPool.Put(buf)
 	for page := lastPage.nextPage; page != nil; page = page.nextPage {
@@ -404,20 +420,14 @@ func (t *Transaction) append(updates []Update) error {
 			return errors.Extend(err, errors.New("Writing the page to disk failed"))
 		}
 	}
-	if err := t.wal.fSync(); err != nil {
-		return errors.Extend(err, errors.New("Writing the new pages to disk failed"))
-	}
 
-	b := lastPage.appendTo(buf[:0])
 	// if writing first page, need to adjust offset
+	b := lastPage.appendTo(buf[:0])
 	offset := lastPage.offset
 	if lastPage == t.firstPage {
 		offset += firstPageMetaSize - pageMetaSize
 	}
 	if _, err := t.wal.logFile.WriteAt(b, int64(offset)); err != nil {
-		return errors.Extend(err, errors.New("Writing the last page to disk failed"))
-	}
-	if err := t.wal.fSync(); err != nil {
 		return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 	}
 

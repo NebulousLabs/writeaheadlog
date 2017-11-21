@@ -57,6 +57,9 @@ type WAL struct {
 	// stopChan is a channel that is used to signal a shutdown
 	stopChan chan struct{}
 
+	// syncing indicates if the syncing thread is currently being executed
+	syncing bool
+
 	// syncErr is the error returned by the most recent fsync call
 	syncErr error
 
@@ -433,5 +436,5 @@ func (w *WAL) Close() error {
 // multiple appearances and them just being loaded a single time correctly.
 func New(path string) (u []Update, w *WAL, err error) {
 	// Create a wal with production dependencies
-	return newWal(path, prodDependencies{})
+	return newWal(path, &prodDependencies{})
 }

@@ -1,5 +1,8 @@
 package writeaheadlog
 
+// TODO: Make it so that not every update changes the silo data. That will
+// probably make the test run a lot faster overall.
+
 import (
 	"bytes"
 	"encoding/binary"
@@ -12,43 +15,49 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/errors"
 	"github.com/NebulousLabs/fastrand"
 	"golang.org/x/crypto/blake2b"
 )
 
 type (
+	// A silo is a simulated group of data that requires using the full
+	// featureset of the wal for maximum performance. The silo is a list of
+	// numbers followed by a checksum. The numbers form a ring (the first
+	// number follows the last number) that has strictly increasing values,
+	// except for one place within the ring where the next number is smaller
+	// than the previous.
+	//
+	// The checksum is the checksum of the silo data plus some external data.
+	// The external data exists in a file with the same name as checksum. The
+	// external data should always be available if the silo exists. There
+	// should also be exactly one external file per file and not more if the
+	// full database is intact and has been consistently managed.
 	silo struct {
-		// list of numbers in silo and the index of the next number that will
-		// be incremented
-		numbers    []uint32
+		// List of numbers in silo and the index of the next number that will
+		// be incremented.
 		nextNumber uint32
+		numbers    []uint32
 
+		// Utilities
+		deps   dependencies
 		f      file  // database file holding silo
 		offset int64 // offset within database
-		deps   dependencies
 	}
 
+	// A siloUpdate contains an update to the silo. There is a number that
+	// needs to be written (it's the smallest number in the silo), as well as
+	// an update to the checksum because the blob file associated with the silo
+	// has changed.
 	siloUpdate struct {
-		// offset is the in the file at which the number should be written
-		offset int64
+		offset int64  // Location in the file where we need to write a number.
+		number uint32 // The number we need to write.
+		silo   int64  // Offset of the silo within the file.
 
-		// number is the number which is written at offset
-		number uint32
-
-		// silo is the offset of the silo so we can apply the update to the right silo
-		silo int64
-
-		// oldChecksum is the checksum of the file that became obsolete after changing a
-		// number. It needs to be removed when the update is applied.
-		oldChecksum checksum
-
-		// newChecksum is the new checkum of the silo and the corresponding file
-		newChecksum checksum
-
-		// ncso is the offset of the new checksum
-		newChecksumOffset int64
+		// Datafile checksum management.
+		prevChecksum   checksum // Need to remove the corresponding file.
+		newChecksum    checksum // Need to write the new checksum. File already exists.
+		checksumOffset int64    // Location to write the checksum.
 	}
 )
 
@@ -73,8 +82,8 @@ func (su siloUpdate) marshal() []byte {
 	binary.LittleEndian.PutUint64(data[0:8], uint64(su.offset))
 	binary.LittleEndian.PutUint32(data[8:12], su.number)
 	binary.LittleEndian.PutUint64(data[12:20], uint64(su.silo))
-	binary.LittleEndian.PutUint64(data[20:28], uint64(su.newChecksumOffset))
-	copy(data[28:28+checksumSize], su.oldChecksum[:])
+	binary.LittleEndian.PutUint64(data[20:28], uint64(su.checksumOffset))
+	copy(data[28:28+checksumSize], su.prevChecksum[:])
 	copy(data[28+checksumSize:], su.newChecksum[:])
 	return data
 }
@@ -87,8 +96,8 @@ func (su *siloUpdate) unmarshal(data []byte) {
 	su.offset = int64(binary.LittleEndian.Uint64(data[0:8]))
 	su.number = binary.LittleEndian.Uint32(data[8:12])
 	su.silo = int64(binary.LittleEndian.Uint64(data[12:20]))
-	su.newChecksumOffset = int64(binary.LittleEndian.Uint64(data[20:28]))
-	copy(su.oldChecksum[:], data[28:28+checksumSize])
+	su.checksumOffset = int64(binary.LittleEndian.Uint64(data[20:28]))
+	copy(su.prevChecksum[:], data[28:28+checksumSize])
 	copy(su.newChecksum[:], data[28+checksumSize:])
 	return
 }
@@ -106,11 +115,11 @@ func (su *siloUpdate) newUpdate() Update {
 // newSiloUpdate creates a new Silo update for a number at a specific index
 func (s *silo) newSiloUpdate(index uint32, number uint32, ocs checksum) *siloUpdate {
 	return &siloUpdate{
-		number:            number,
-		offset:            s.offset + int64(4*(index)),
-		silo:              s.offset,
-		oldChecksum:       ocs,
-		newChecksumOffset: s.offset + int64(len(s.numbers)*4),
+		number:         number,
+		offset:         s.offset + int64(4*(index)),
+		silo:           s.offset,
+		prevChecksum:   ocs,
+		checksumOffset: s.offset + int64(len(s.numbers)*4),
 	}
 }
 
@@ -140,13 +149,13 @@ func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 	}
 
 	// Write new checksum
-	_, err = silo.f.WriteAt(su.newChecksum[:], su.newChecksumOffset)
+	_, err = silo.f.WriteAt(su.newChecksum[:], su.checksumOffset)
 	if err != nil {
 		return err
 	}
 
 	// Delete old data file if it still exists
-	err = silo.deps.remove(filepath.Join(dataPath, hex.EncodeToString(su.oldChecksum[:])))
+	err = silo.deps.remove(filepath.Join(dataPath, hex.EncodeToString(su.prevChecksum[:])))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -242,7 +251,7 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 		}
 
 		// Append the remaining updates
-		if err := txn.Append(updates[appendFrom:]); err != nil {
+		if err := <-txn.Append(updates[appendFrom:]); err != nil {
 			return
 		}
 
@@ -287,7 +296,7 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 	// Reload wal.
 	updates, wal, err := newWal(walPath, deps)
 	if err != nil {
-		return build.ExtendErr("failed to reload WAL", err)
+		return errors.Extend(errors.New("failed to reload WAL"), err)
 	}
 	defer func() {
 		if err != nil {
@@ -301,7 +310,7 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 		var su siloUpdate
 		su.unmarshal(update.Instructions)
 		if err := su.applyUpdate(silos[su.silo], testdir); err != nil {
-			return build.ExtendErr("Failed to apply update", err)
+			return errors.Extend(errors.New("Failed to apply update"), err)
 		}
 		// Remember new checksums to be able to remove unnecessary setup files
 		// later
@@ -310,20 +319,20 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 
 	// Sync the applied updates
 	if err := file.Sync(); err != nil {
-		return build.ExtendErr("Failed to sync database", err)
+		return errors.Extend(errors.New("Failed to sync database"), err)
 	}
 
 	// Remove unnecessary setup files
 	files, err := ioutil.ReadDir(testdir)
 	if err != nil {
-		return build.ExtendErr("Failed to get list of files in testdir", err)
+		return errors.Extend(errors.New("Failed to get list of files in testdir"), err)
 	}
 	for _, f := range files {
 		_, exists := checksums[f.Name()]
 		if len(f.Name()) == 32 && !exists {
 			if err := deps.remove(filepath.Join(testdir, f.Name())); err != nil && !os.IsNotExist(err) {
 
-				return build.ExtendErr("Failed to remove setup file", err)
+				return errors.Extend(errors.New("Failed to remove setup file"), err)
 			}
 		}
 	}
@@ -337,10 +346,10 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 
 		// Read numbers and checksum
 		if _, err := silo.f.ReadAt(numbers, silo.offset); err != nil {
-			return build.ExtendErr("Failed to read numbers of silo", err)
+			return errors.Extend(errors.New("Failed to read numbers of silo"), err)
 		}
 		if _, err := silo.f.ReadAt(cs[:], silo.offset+int64(4*len(silo.numbers))); err != nil {
-			return build.ExtendErr("Failed to read checksum of silo", err)
+			return errors.Extend(errors.New("Failed to read checksum of silo"), err)
 		}
 
 		// The checksum should match
@@ -351,12 +360,12 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 	}
 
 	if err := wal.RecoveryComplete(); err != nil {
-		return build.ExtendErr("Failed to signal completed recovery: %v", err)
+		return errors.Extend(errors.New("Failed to signal completed recovery"), err)
 	}
 
 	// Close the wal
 	if err := wal.Close(); err != nil {
-		return build.ExtendErr("Failed to close WAL", err)
+		return errors.Extend(errors.New("Failed to close WAL"), err)
 	}
 	return nil
 }
@@ -369,7 +378,7 @@ func TestSilo(t *testing.T) {
 	}
 
 	deps := newFaultyDiskDependency(5000)
-	testdir := build.TempDir("wal", t.Name())
+	testdir := tempDir("wal", t.Name())
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
 
@@ -384,7 +393,7 @@ func TestSilo(t *testing.T) {
 	numSilos := int64(250)
 	numIncrease := 20
 	maxCntr := 50
-	numRetries := 1000
+	numRetries := 100
 	counters := make([]int, maxCntr, maxCntr)
 	endTime := time.Now().Add(5 * time.Minute)
 	iters := 0
@@ -406,7 +415,7 @@ func TestSilo(t *testing.T) {
 		}
 
 		// Create wal with disabled dependencies
-		updates, wal, err := newWal(walPath, deps)
+		updates, wal, err := newWal(walPath, &deps)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,7 +427,7 @@ func TestSilo(t *testing.T) {
 		// Reset dependencies and increase the write limit to allow for higher
 		// success rate
 		deps.reset()
-		*deps.writeLimit = 5000
+		deps.writeLimit = 5000
 
 		var siloOff int64
 		var siloOffsets []int64
@@ -427,7 +436,7 @@ func TestSilo(t *testing.T) {
 		// Start the threaded update after creating and initializing the silos
 		for i := 0; int64(i) < numSilos; i++ {
 			wg.Add(1)
-			silo := newSilo(siloOff, 1+i*numIncrease, deps, file)
+			silo := newSilo(siloOff, 1+i*numIncrease, &deps, file)
 			if err := silo.init(); err != nil {
 				t.Fatalf("Failed to init silo: %v", err)
 			}
@@ -452,18 +461,18 @@ func TestSilo(t *testing.T) {
 		// Reset dependencies and set limit to a high value that can never be
 		// reached to make sure we can recover after enough tries
 		deps.reset()
-		*deps.writeLimit = math.MaxUint64
+		deps.writeLimit = math.MaxUint64
 
 		// Repeatedly try to recover WAL
-		err = build.Retry(numRetries, time.Millisecond, func() error {
+		err = retry(numRetries, time.Millisecond, func() error {
 			counters[cntr]++
 			// Reset failed and try again
 			deps.mu.Lock()
-			*deps.failed = false
+			deps.failed = false
 			deps.mu.Unlock()
 
 			// Try to recover WAL
-			return recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
+			return recoverSiloWAL(walPath, &deps, silos, testdir, file, numSilos, numIncrease)
 		})
 		if err != nil {
 			t.Fatalf("WAL never recovered: %v", err)

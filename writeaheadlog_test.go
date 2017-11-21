@@ -3,6 +3,7 @@ package writeaheadlog
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,21 @@ func tempDir(dirs ...string) string {
 	path := filepath.Join(os.TempDir(), "wal", filepath.Join(dirs...))
 	os.RemoveAll(path) // remove old test data
 	return path
+}
+
+// retry will call 'fn' 'tries' times, waiting 'durationBetweenAttempts'
+// between each attempt, returning 'nil' the first time that 'fn' returns nil.
+// If 'nil' is never returned, then the final error returned by 'fn' is
+// returned.
+func retry(tries int, durationBetweenAttempts time.Duration, fn func() error) (err error) {
+	for i := 1; i < tries; i++ {
+		err = fn()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(durationBetweenAttempts)
+	}
+	return fn()
 }
 
 //dependencyUncleanShutdown prevnts the wal from marking the logfile as clean
@@ -105,7 +121,7 @@ func transactionPages(txn *Transaction) (pages []page) {
 // TestCommitFailed checks if a corruption of the first page of the
 // transaction during the commit is handled correctly
 func TestCommitFailed(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyCommitFail{})
+	wt, err := newWALTester(t.Name(), &dependencyCommitFail{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +213,7 @@ func BenchmarkUnmarshalUpdates(b *testing.B) {
 // TestReleaseFailed checks if a corruption of the first page of the
 // transaction during the commit is handled correctly
 func TestReleaseFailed(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyReleaseFail{})
+	wt, err := newWALTester(t.Name(), &dependencyReleaseFail{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +268,7 @@ func TestReleaseFailed(t *testing.T) {
 // TestReleaseNotCalled checks if an interrupt between committing and releasing a
 // transaction is handled correctly upon reboot
 func TestReleaseNotCalled(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +329,7 @@ func TestReleaseNotCalled(t *testing.T) {
 // no unfinished transactions should be reported because the second one is
 // assumed to be corrupted too
 func TestPayloadCorrupted(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +394,7 @@ func TestPayloadCorrupted(t *testing.T) {
 // TestPayloadCorrupted2 creates 2 update and corrupts the second one. Therefore
 // one unfinished transaction should be reported
 func TestPayloadCorrupted2(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +460,7 @@ func TestPayloadCorrupted2(t *testing.T) {
 // The wal won't be deleted but reloaded instead to check if the amount of returned failed updates
 // equals 0
 func TestWalParallel(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), &prodDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +540,7 @@ func TestWalParallel(t *testing.T) {
 
 // TestPageRecycling checks if pages are actually freed and used again after a transaction was applied
 func TestPageRecycling(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), &prodDependencies{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -705,7 +721,7 @@ func TestRestoreTransactions(t *testing.T) {
 // TestRecoveryFailed checks if the WAL behave correctly if a crash occurs
 // during a call to RecoveryComplete
 func TestRecoveryFailed(t *testing.T) {
-	wt, err := newWALTester(t.Name(), dependencyUncleanShutdown{})
+	wt, err := newWALTester(t.Name(), &dependencyUncleanShutdown{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -737,7 +753,7 @@ func TestRecoveryFailed(t *testing.T) {
 		t.Error("There should have been an error but there wasn't")
 	}
 
-	updates2, w, err := newWal(wt.path, dependencyRecoveryFail{})
+	updates2, w, err := newWal(wt.path, &dependencyRecoveryFail{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,7 +808,7 @@ func TestRecoveryFailed(t *testing.T) {
 // TestTransactionAppend tests the functionality of the Transaction's append
 // call
 func TestTransactionAppend(t *testing.T) {
-	wt, err := newWALTester(t.Name(), prodDependencies{})
+	wt, err := newWALTester(t.Name(), &prodDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -838,10 +854,12 @@ func TestTransactionAppend(t *testing.T) {
 // benchmarkTransactionSpeed is a helper function to create benchmarks that run
 // for 1 min to find out how many transactions can be applied to the wal and
 // how large the wal grows during that time using a certain number of threads.
-func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
+// When appendUpdate is set to 'true', a second update will be appended to the
+// transaction before it is committed.
+func benchmarkTransactionSpeed(b *testing.B, numThreads int, appendUpdate bool) {
 	b.Logf("Running benchmark with %v threads", numThreads)
 
-	wt, err := newWALTester(b.Name(), prodDependencies{})
+	wt, err := newWALTester(b.Name(), &prodDependencies{})
 	if err != nil {
 		b.Error(err)
 	}
@@ -864,6 +882,12 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 		txn, err := wt.wal.NewTransaction(updates)
 		if err != nil {
 			return
+		}
+		// Append second update
+		if appendUpdate {
+			if err = <-txn.Append(updates); err != nil {
+				return
+			}
 		}
 		// Wait for the txn to be committed
 		if err = <-txn.SignalSetupComplete(); err != nil {
@@ -956,50 +980,26 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int) {
 
 }
 
-// BenchmarkTransactionSpeed1 runs benchmarkTransactionSpeed with 1
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 15.5  , 125.49, 09/17/2017
-// MZVLW512HMJP, 175.28, 15.4  , 09/17/2017
-//
-func BenchmarkTransactionSpeed1(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1)
+// BenchmarkTransactionSpeedAppend runs benchmarkTransactionSpeed with append =
+// false
+func BenchmarkTransactionSpeed(b *testing.B) {
+	numThreads := []int{1, 10, 100, 1000}
+	for _, n := range numThreads {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			benchmarkTransactionSpeed(b, n, false)
+		})
+	}
 }
 
-// BenchmarkTransactionSpeed10 runs benchmarkTransactionSpeed with 10
-// threads
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 140.6  , 125.86, 09/17/2017
-// MZVLW512HMJP, 1437.35, 18.07 , 09/17/2017
-//
-func BenchmarkTransactionSpeed10(b *testing.B) {
-	benchmarkTransactionSpeed(b, 10)
-}
-
-// BenchmarkTransactionSpeed100 runs benchmarkTransactionSpeed with 100
-// threads
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 1285   , 209.37, 09/17/2017
-// MZVLW512HMJP, 7589.93, 160.18, 09/17/2017
-//
-func BenchmarkTransactionSpeed100(b *testing.B) {
-	benchmarkTransactionSpeed(b, 100)
-}
-
-// BenchmarkTransactionSpeed1000 runs benchmarkTransactionSpeed with 1000
-//
-// Results (Model, txn/s, maxLatency(ms), date)
-//
-// ST1000DM003 , 3486   , 461.38, 09/17/2017
-// MZVLW512HMJP, 6101.05, 1479.8, 09/17/2017
-//
-func BenchmarkTransactionSpeed1000(b *testing.B) {
-	benchmarkTransactionSpeed(b, 1000)
+// BenchmarkTransactionSpeedAppend runs benchmarkTransactionSpeed with append =
+// true
+func BenchmarkTransactionSpeedAppend(b *testing.B) {
+	numThreads := []int{1, 10, 100, 1000}
+	for _, n := range numThreads {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			benchmarkTransactionSpeed(b, n, true)
+		})
+	}
 }
 
 // benchmarkDiskWrites writes numThreads pages of pageSize size and spins up 1
