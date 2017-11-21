@@ -9,8 +9,8 @@ import (
 	"github.com/NebulousLabs/fastrand"
 )
 
-// faultyDiskDependency implements dependencies that simulate a faulty disk.
-type faultyDiskDependency struct {
+// dependencyFaultyDisk implements dependencies that simulate a faulty disk.
+type dependencyFaultyDisk struct {
 	// failDenominator determines how likely it is that a write will fail,
 	// defined as 1/failDenominator. Each write call increments
 	// failDenominator, and it starts at 2. This means that the more calls to
@@ -26,14 +26,14 @@ type faultyDiskDependency struct {
 // newFaultyDiskDependency creates a dependency that can be used to simulate a
 // failing disk. writeLimit is the maximum number of writes the disk will
 // endure before failing
-func newFaultyDiskDependency(writeLimit uint64) faultyDiskDependency {
-	return faultyDiskDependency{
+func newFaultyDiskDependency(writeLimit uint64) dependencyFaultyDisk {
+	return dependencyFaultyDisk{
 		failDenominator: uint64(3),
 		writeLimit:      writeLimit,
 	}
 }
 
-func (d *faultyDiskDependency) create(path string) (file, error) {
+func (d *dependencyFaultyDisk) create(path string) (file, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.failed {
@@ -48,23 +48,23 @@ func (d *faultyDiskDependency) create(path string) (file, error) {
 }
 
 // disabled allows the caller to temporarily disable the dependency
-func (d *faultyDiskDependency) disable(b bool) {
+func (d *dependencyFaultyDisk) disable(b bool) {
 	d.mu.Lock()
 	d.disabled = b
 	d.mu.Unlock()
 }
-func (*faultyDiskDependency) disrupt(s string) bool {
+func (*dependencyFaultyDisk) disrupt(s string) bool {
 	return s == "FaultyDisk"
 }
 
 // newFaultyFile creates a new faulty file around the provided file handle.
-func (d *faultyDiskDependency) newFaultyFile(f *os.File) *faultyFile {
+func (d *dependencyFaultyDisk) newFaultyFile(f *os.File) *faultyFile {
 	return &faultyFile{d: d, file: f}
 }
-func (*faultyDiskDependency) readFile(path string) ([]byte, error) {
+func (*dependencyFaultyDisk) readFile(path string) ([]byte, error) {
 	return ioutil.ReadFile(path)
 }
-func (d *faultyDiskDependency) remove(path string) error {
+func (d *dependencyFaultyDisk) remove(path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -83,13 +83,13 @@ func (d *faultyDiskDependency) remove(path string) error {
 }
 
 // reset resets the failDenominator and the failed flag of the dependency
-func (d *faultyDiskDependency) reset() {
+func (d *dependencyFaultyDisk) reset() {
 	d.mu.Lock()
 	d.failDenominator = 3
 	d.failed = false
 	d.mu.Unlock()
 }
-func (d *faultyDiskDependency) openFile(path string, flag int, perm os.FileMode) (file, error) {
+func (d *dependencyFaultyDisk) openFile(path string, flag int, perm os.FileMode) (file, error) {
 	f, err := os.OpenFile(path, flag, perm)
 	if err != nil {
 		return nil, err
@@ -99,7 +99,7 @@ func (d *faultyDiskDependency) openFile(path string, flag int, perm os.FileMode)
 
 // faultyFile implements a file that simulates a faulty disk.
 type faultyFile struct {
-	d    *faultyDiskDependency
+	d    *dependencyFaultyDisk
 	file *os.File
 }
 
@@ -164,7 +164,7 @@ func (f *faultyFile) Sync() error {
 // dependencyCommitFail corrupts the first page of a transaction when it
 // is committed
 type dependencyCommitFail struct {
-	prodDependencies
+	dependencyProduction
 }
 
 func (*dependencyCommitFail) disrupt(s string) bool {
@@ -177,7 +177,7 @@ func (*dependencyCommitFail) disrupt(s string) bool {
 // dependencyRecoveryFail causes the RecoveryComplete function to fail after
 // the metadata was changed to wipe
 type dependencyRecoveryFail struct {
-	prodDependencies
+	dependencyProduction
 }
 
 func (dependencyRecoveryFail) disrupt(s string) bool {
@@ -193,7 +193,7 @@ func (dependencyRecoveryFail) disrupt(s string) bool {
 // dependencyReleaseFail corrupts the first page of a transaction when it
 // is released
 type dependencyReleaseFail struct {
-	prodDependencies
+	dependencyProduction
 }
 
 func (*dependencyReleaseFail) disrupt(s string) bool {
@@ -206,7 +206,7 @@ func (*dependencyReleaseFail) disrupt(s string) bool {
 // dependencyUncleanShutdown prevnts the wal from marking the logfile as clean
 // upon shutdown
 type dependencyUncleanShutdown struct {
-	prodDependencies
+	dependencyProduction
 }
 
 func (dependencyUncleanShutdown) disrupt(s string) bool {

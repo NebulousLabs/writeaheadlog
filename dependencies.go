@@ -28,19 +28,19 @@ type (
 	}
 )
 
-// prodDependencies is a passthrough to the standard library calls
-type prodDependencies struct{}
+// dependencyProduction is a passthrough to the standard library calls
+type dependencyProduction struct{}
 
-func (*prodDependencies) disrupt(string) bool { return false }
-func (*prodDependencies) readFile(path string) ([]byte, error) {
+func (*dependencyProduction) disrupt(string) bool { return false }
+func (*dependencyProduction) readFile(path string) ([]byte, error) {
 	return ioutil.ReadFile(path)
 }
-func (*prodDependencies) openFile(path string, flag int, perm os.FileMode) (file, error) {
+func (*dependencyProduction) openFile(path string, flag int, perm os.FileMode) (file, error) {
 	return os.OpenFile(path, flag, perm)
 }
-func (*prodDependencies) create(path string) (file, error) {
+func (*dependencyProduction) create(path string) (file, error) {
 	return os.Create(path)
 }
-func (*prodDependencies) remove(path string) error {
+func (*dependencyProduction) remove(path string) error {
 	return os.Remove(path)
 }

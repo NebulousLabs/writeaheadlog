@@ -424,7 +424,7 @@ func TestPayloadCorrupted2(t *testing.T) {
 // The wal won't be deleted but reloaded instead to check if the amount of returned failed updates
 // equals 0
 func TestWalParallel(t *testing.T) {
-	wt, err := newWALTester(t.Name(), &prodDependencies{})
+	wt, err := newWALTester(t.Name(), &dependencyProduction{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +503,7 @@ func TestWalParallel(t *testing.T) {
 
 // TestPageRecycling checks if pages are actually freed and used again after a transaction was applied
 func TestPageRecycling(t *testing.T) {
-	wt, err := newWALTester(t.Name(), &prodDependencies{})
+	wt, err := newWALTester(t.Name(), &dependencyProduction{})
 	if err != nil {
 		t.Error(err)
 	}
@@ -769,7 +769,7 @@ func TestRecoveryFailed(t *testing.T) {
 // TestTransactionAppend tests the functionality of the Transaction's append
 // call
 func TestTransactionAppend(t *testing.T) {
-	wt, err := newWALTester(t.Name(), &prodDependencies{})
+	wt, err := newWALTester(t.Name(), &dependencyProduction{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -819,7 +819,7 @@ func TestTransactionAppend(t *testing.T) {
 func benchmarkTransactionSpeed(b *testing.B, numThreads int, appendUpdate bool) {
 	b.Logf("Running benchmark with %v threads", numThreads)
 
-	wt, err := newWALTester(b.Name(), &prodDependencies{})
+	wt, err := newWALTester(b.Name(), &dependencyProduction{})
 	if err != nil {
 		b.Error(err)
 	}
