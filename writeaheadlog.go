@@ -6,7 +6,6 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
-	"math"
 	"os"
 	"sort"
 	"sync"
@@ -58,6 +57,9 @@ type WAL struct {
 	// stopChan is a channel that is used to signal a shutdown
 	stopChan chan struct{}
 
+	// syncing indicates if the syncing thread is currently being executed
+	syncing bool
+
 	// syncErr is the error returned by the most recent fsync call
 	syncErr error
 
@@ -68,32 +70,6 @@ type WAL struct {
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
 	deps dependencies
-}
-
-type (
-	// SortPage is a helper struct for sorting, that contains a page and the offset
-	// of the next page
-	SortPage struct {
-		p        *page
-		nextPage uint64
-	}
-	// ByTxnNumber is a type that implements the sorting interface for the SortPage struct
-	ByTxnNumber []SortPage
-)
-
-// Len returns the length of the slice
-func (p ByTxnNumber) Len() int {
-	return len(p)
-}
-
-// Swap swaps two elements of the slice
-func (p ByTxnNumber) Swap(i, j int) {
-	p[i], p[j] = p[j], p[i]
-}
-
-// Less determines if one element of the slice is less than the other
-func (p ByTxnNumber) Less(i, j int) bool {
-	return p[i].p.transactionNumber < p[j].p.transactionNumber
 }
 
 // allocatePages creates new pages and adds them to the available pages of the wal
@@ -127,11 +103,16 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 		}
 
 		// Recover WAL and return updates
-		updates, err := newWal.recoverWal(data)
+		updates, err := newWal.recoverWAL(data)
 		if err != nil {
 			err = errors.Compose(err, newWal.logFile.Close())
+			return nil, nil, err
 		}
-		return updates, newWal, err
+		if len(updates) == 0 {
+			// if there are no updates to apply, set the recovery to complete
+			newWal.recoveryComplete = true
+		}
+		return updates, newWal, nil
 
 	} else if !os.IsNotExist(err) {
 		// the file exists but couldn't be opened
@@ -175,11 +156,8 @@ func readWALMetadata(data []byte) (uint16, error) {
 	return fileState, nil
 }
 
-// recover recovers a WAL and returns comitted but not finished updates
-func (w *WAL) recoverWal(data []byte) ([]Update, error) {
-	// Get all the first pages to sort them by txn number
-	var firstPages ByTxnNumber
-
+// recoverWAL recovers a WAL and returns comitted but not finished updates
+func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 	// Validate metadata
 	recoveryState, err := readWALMetadata(data[0:])
 	if err != nil {
@@ -191,7 +169,7 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 			return nil, errors.Extend(err, errors.New("unable to write WAL recovery state"))
 		}
 		w.recoveryComplete = true
-		return []Update{}, nil
+		return nil, nil
 	}
 
 	// If recoveryState is set to wipe we don't need to recover but we have to
@@ -204,56 +182,101 @@ func (w *WAL) recoverWal(data []byte) ([]Update, error) {
 			return nil, errors.Extend(err, errors.New("unable to write WAL recovery state"))
 		}
 		w.recoveryComplete = true
-		return []Update{}, w.logFile.Sync()
+		return nil, w.logFile.Sync()
 	}
 
-	// Starting at index 1 because the first page is reserved for metadata
-	for i := 1; int64(i)*pageSize < int64(len(data)); i++ {
-		// read the page data
-		offset := int64(i) * pageSize
-
-		// unmarshall the page
-		var p page
-		var nextPage uint64
-		var err error
-		p.offset = uint64(offset)
-
-		// unmarshal the page from data. If the remaining data is less than the
-		// page size, unmarshal the rest of the data from offset:. Otherwise,
-		// unmarshal the data from offset:offset+pageSize.
-		if offset+pageSize > int64(len(data)) {
-			nextPage, err = unmarshalPage(&p, data[offset:])
-		} else {
-			nextPage, err = unmarshalPage(&p, data[offset:offset+pageSize])
+	// load all normal pages
+	type diskPage struct {
+		page
+		nextPageOffset uint64
+	}
+	pageSet := make(map[uint64]*diskPage) // keyed by offset
+	for i := uint64(pageSize); i+pageMetaSize < uint64(len(data)); i += pageSize {
+		status := binary.LittleEndian.Uint64(data[i:])
+		if status != txnStatusPage {
+			continue
 		}
-		if err != nil {
+		nextOffset := binary.LittleEndian.Uint64(data[i+8:])
+		payloadSize := binary.LittleEndian.Uint64(data[i+16:])
+		if payloadSize > MaxPayloadSize {
+			continue
+		}
+		payload := data[i+24 : i+24+payloadSize]
+
+		pageSet[i] = &diskPage{
+			page: page{
+				offset:  i,
+				payload: payload,
+			},
+			nextPageOffset: nextOffset,
+		}
+	}
+
+	// fill in each nextPage pointer
+	for _, p := range pageSet {
+		if nextDiskPage, ok := pageSet[p.nextPageOffset]; ok {
+			p.nextPage = &nextDiskPage.page
+		}
+	}
+
+	// reconstruct transactions
+	var txns []Transaction
+	for i := pageSize; i+firstPageMetaSize < len(data); i += pageSize {
+		status := binary.LittleEndian.Uint64(data[i:])
+		if status != txnStatusComitted {
+			continue
+		}
+		// decode metadata and first page
+		seq := binary.LittleEndian.Uint64(data[i+8:])
+		var diskChecksum checksum
+		n := copy(diskChecksum[:], data[i+16:])
+		nextPageOffset := binary.LittleEndian.Uint64(data[i+16+n:])
+		payloadSize := binary.LittleEndian.Uint64(data[i+16+n+8:])
+		if payloadSize > maxFirstPayloadSize {
+			continue
+		}
+		firstPage := &page{
+			payload: data[i+firstPageMetaSize : i+firstPageMetaSize+int(payloadSize)],
+		}
+		if nextDiskPage, ok := pageSet[nextPageOffset]; ok {
+			firstPage.nextPage = &nextDiskPage.page
+		}
+
+		txn := Transaction{
+			status:         status,
+			sequenceNumber: seq,
+			firstPage:      firstPage,
+		}
+
+		// validate checksum
+		if txn.checksum() != diskChecksum {
 			continue
 		}
 
-		// If the page is the first page of a transaction remember it
-		if p.pageStatus == pageStatusComitted {
-			firstPages = append(firstPages, SortPage{p: &p, nextPage: nextPage})
+		// decode updates
+		var updateBytes []byte
+		for page := txn.firstPage; page != nil; page = page.nextPage {
+			updateBytes = append(updateBytes, page.payload...)
 		}
-	}
-
-	// Sort the first pages by transaction number
-	sort.Sort(firstPages)
-	// Recover the transactions in order and get their updates
-	updates := []Update{}
-	for _, sp := range firstPages {
-		var txn Transaction
-		err := unmarshalTransaction(&txn, sp.p, sp.nextPage, data)
+		updates, err := unmarshalUpdates(updateBytes)
 		if err != nil {
 			continue
 		}
+		txn.Updates = updates
+
+		txns = append(txns, txn)
+	}
+
+	// sort txns by sequence number
+	sort.Slice(txns, func(i, j int) bool {
+		return txns[i].sequenceNumber < txns[j].sequenceNumber
+	})
+
+	// concatenate the updates of each transaction
+	var updates []Update
+	for _, txn := range txns {
 		updates = append(updates, txn.Updates...)
 	}
-
-	// If there were no updates we can savely set the recovery to complete
-	if len(updates) == 0 {
-		w.recoveryComplete = true
-	}
-
 	return updates, nil
 }
 
@@ -298,10 +321,10 @@ func (w *WAL) RecoveryComplete() error {
 	return nil
 }
 
-// managedReservePages reserves pages for a given payload. If it needs to
-// allocate new pages it will do so. The pageStatus of the first page needs to
-// be set manually.
-func (w *WAL) managedReservePages(data []byte) []page {
+// managedReservePages reserves pages for a given payload and links them
+// together, allocating new pages if necessary. It returns the first page in
+// the chain.
+func (w *WAL) managedReservePages(data []byte) *page {
 	// Find out how many pages are needed for the payload
 	numPages := len(data) / MaxPayloadSize
 	if len(data)%MaxPayloadSize != 0 {
@@ -328,120 +351,26 @@ func (w *WAL) managedReservePages(data []byte) []page {
 	buf := bytes.NewBuffer(data)
 	pages := make([]page, numPages)
 	for i := range pages {
-		// Set offset according to the index in reservedPages
-		pages[i].offset = reservedPages[i]
-
 		// Set nextPage if the current page isn't the last one
-		// otherwise let it be nil
 		if i+1 < numPages {
 			pages[i].nextPage = &pages[i+1]
 		}
 
-		// Set pageStatus of all pages to pageStatusOther
-		pages[i].pageStatus = pageStatusOther
+		// Set offset according to the index in reservedPages
+		pages[i].offset = reservedPages[i]
 
 		// Copy part of the update into the payload
 		pages[i].payload = buf.Next(MaxPayloadSize)
 	}
 
-	return pages
+	return &pages[0]
 }
 
-// UnmarshalPage is a helper function that unmarshals the page and returns the offset of the next one
-// Note: setting offset and validating the checksum needs to be handled by the caller
-func unmarshalPage(p *page, b []byte) (nextPage uint64, err error) {
-	buffer := bytes.NewBuffer(b)
-
-	// Read checksum, pageStatus, transactionNumber and nextPage
-	_, err1 := buffer.Read(p.transactionChecksum[:])
-	err2 := binary.Read(buffer, binary.LittleEndian, &p.pageStatus)
-	err3 := binary.Read(buffer, binary.LittleEndian, &p.transactionNumber)
-	err4 := binary.Read(buffer, binary.LittleEndian, &nextPage)
-
-	// Read payloadSize
-	var payloadSize uint64
-	err5 := binary.Read(buffer, binary.LittleEndian, &payloadSize)
-	if payloadSize == 0 || payloadSize > MaxPayloadSize {
-		err = errors.New("invalid page payload size")
-		return
-	}
-
-	// Read payload
-	p.payload = make([]byte, payloadSize)
-	_, err6 := buffer.Read(p.payload[:])
-
-	// Check for errors
-	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
-		err = errors.Compose(errors.New("Failed to unmarshal wal page"), err1, err2, err3, err4, err5, err6)
-		return
-	}
-
-	return
-}
-
-// unmarshalTransaction unmarshals a transaction starting at the first page
-func unmarshalTransaction(txn *Transaction, firstPage *page, nextPageOffset uint64, logData []byte) error {
-	// Set the first page of the txn
-	txn.firstPage = firstPage
-
-	p := firstPage
-	npo := nextPageOffset
-	var err error
-	var txnPayload []byte
-	// Unmarshal the pages in the order of the transaction
-	for {
-		// Get the payload of each page
-		txnPayload = append(txnPayload, p.payload...)
-
-		// Determine if the last page was reached and set the final page of the txn accordingly
-		if npo == math.MaxUint64 {
-			p.nextPage = nil
-			p = nil
-			break
-		}
-
-		// Set the offset for the next page before npo is overwritten
-		var nextPage page
-		nextPage.offset = npo
-
-		// Unmarshal the page. The last page might not have pageSize bytes.
-		if npo+pageSize > uint64(len(logData)) {
-			npo, err = unmarshalPage(&nextPage, logData[npo:])
-		} else {
-			npo, err = unmarshalPage(&nextPage, logData[npo:npo+pageSize])
-		}
-		if err != nil {
-			return err
-		}
-
-		// Move on to the next page
-		p.nextPage = &nextPage
-		p = &nextPage
-	}
-
-	// Verify the checksum before unmarshalling the updates. Otherwise we might
-	// get errors later
-	if err := txn.validateChecksum(); err != nil {
-		return err
-	}
-
-	// Restore updates from payload
-	if txn.Updates, err = unmarshalUpdates(txnPayload); err != nil {
-		return errors.Extend(err, errors.New("Unable to unmarshal updates"))
-	}
-
-	// Set flags accordingly
-	txn.setupComplete = true
-	txn.commitComplete = true
-
-	return nil
-}
-
-// wipeWAL sets all the page of the WAL to applied so it can be reused
+// wipeWAL sets all the pages of the WAL to applied so that they can be reused.
 func (w *WAL) wipeWAL() error {
-	// Marshal the pageStatusApplied
-	pageAppliedBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(pageAppliedBytes, pageStatusApplied)
+	// Marshal the txnStatusApplied
+	txnAppliedBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(txnAppliedBytes, txnStatusApplied)
 
 	// Get the length of the file.
 	stat, err := w.logFile.Stat()
@@ -451,8 +380,8 @@ func (w *WAL) wipeWAL() error {
 	length := stat.Size()
 
 	// Set all pages to applied.
-	for offset := int64(pageSize + checksumSize); offset < length; offset += pageSize {
-		if _, err := w.logFile.WriteAt(pageAppliedBytes, offset); err != nil {
+	for offset := int64(pageSize); offset < length; offset += pageSize {
+		if _, err := w.logFile.WriteAt(txnAppliedBytes, offset); err != nil {
 			return err
 		}
 	}

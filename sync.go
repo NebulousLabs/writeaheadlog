@@ -9,6 +9,7 @@ func (w *WAL) threadedSync() {
 		w.syncCond.L.Lock()
 		if w.syncCount == 0 {
 			// nothing to sync
+			w.syncing = false
 			w.syncCond.L.Unlock()
 			return
 		}
@@ -40,7 +41,8 @@ func (w *WAL) fSync() error {
 	w.syncCount++
 
 	// If we are the only syncing thread, spawn the threadedSync loop
-	if w.syncCount == 1 {
+	if !w.syncing {
+		w.syncing = true
 		go w.threadedSync()
 	}
 

@@ -3,21 +3,46 @@ package writeaheadlog
 const (
 	checksumSize = 16
 	pageSize     = 4096
-	pageMetaSize = checksumSize + 4*8 // checksum + 4 uint64s
+	pageMetaSize = 3 * 8 // 3 uint64s: txnStatus, nextPage offset, and payload size
 
 	// MaxPayloadSize is the number of bytes that can fit into a single
 	// page. For best performance, the number of pages written should be
 	// minimized, so clients should try to keep the length of an Update's
 	// Instructions field slightly below a multiple of MaxPayloadSize.
 	MaxPayloadSize = pageSize - pageMetaSize
+
+	// firstPageMetaSize is the size of the marshalled non-payload data of a
+	// transaction's firstPage. It includes the txnStatus, sequence number,
+	// checksum, nextPage offset, and payload size.
+	firstPageMetaSize = 8 + 8 + checksumSize + 8 + 8
+
+	// maxFirstPayloadSize is the number of bytes that can fit into the first
+	// page of a transaction. The first page holds more metadata than the
+	// subsequent pages, so its maximum payload is smaller.
+	maxFirstPayloadSize = pageSize - firstPageMetaSize
 )
 
 const (
-	pageStatusInvalid = iota
-	pageStatusOther
-	pageStatusWritten
-	pageStatusComitted
-	pageStatusApplied
+	// txnStatusInvalid indicates an incorrectly initialized page.
+	txnStatusInvalid = iota
+
+	// txnStatusPage indicates a normal page, i.e. not the first page of a
+	// transaction.
+	txnStatusPage
+
+	// txnStatusWritten indicates that the transaction has been written, but
+	// not fully committed, meaning it should be ignored upon recovery.
+	txnStatusWritten
+
+	// txnStatusCommitted indicates that the transaction has been committed,
+	// but not completed. During recovery, transactions with this status
+	// should be loaded and their updates should be provided to the user.
+	txnStatusComitted
+
+	// txnStatusApplied indicates that the transaction has been committed and
+	// applied. Transactions with this status can be ignored during recovery,
+	// and their associated pages can be reclaimed.
+	txnStatusApplied
 )
 
 const (

@@ -28,12 +28,6 @@ type Update struct {
 	// run on the the update based on the name and version.
 	Name string
 
-	// The version of the update type. Update types and implementations can be
-	// tweaked over time, and a version field allows for easy compatibility
-	// between releases, even if an upgrade occurs between an unclean shutdown
-	// and a reload.
-	Version string
-
 	// The marshalled data directing the update. The data is an opaque set of
 	// instructions to follow that implement and idempotent change to a set of
 	// persistent files. A series of unclean shutdowns in rapid succession could
@@ -73,8 +67,20 @@ type Transaction struct {
 	commitComplete  bool
 	releaseComplete bool
 
-	// firstPage is the first page of the transaction. It is the last page that
-	// is written when finalizing a commit and when releasing a transaction.
+	// status indicates the status of the transaction. It is marshalled to
+	// disk. See consts.go for an explanation of each status type.
+	status uint64
+
+	// sequenceNumber is a unique identifier for the transaction that orders
+	// it in relation to other transactions. It is marshalled to disk.
+	sequenceNumber uint64
+
+	// firstPage is the first page of the transaction. It is marshalled to
+	// disk. Note that because additional transaction metadata (status,
+	// sequenceNumber, checksum) is marshalled alongside firstPage, the
+	// capacity of firstPage.payload is smaller than subsequent pages.
+	//
+	// firstPage is never nil for valid transactions.
 	firstPage *page
 
 	// Updates defines the set of updates that compose the transaction.
@@ -101,9 +107,14 @@ func (t Transaction) checksum() (c checksum) {
 	h, _ := blake2b.New256(nil)
 	buf := bufPool.Get().([]byte)
 	defer bufPool.Put(buf)
+	// write the transaction metadata
+	binary.LittleEndian.PutUint64(buf[:], t.status)
+	binary.LittleEndian.PutUint64(buf[8:], t.sequenceNumber)
+	h.Write(buf[:16])
+	// write pages
 	for page := t.firstPage; page != nil; page = page.nextPage {
 		b := page.appendTo(buf[:0])
-		h.Write(b[checksumSize:]) // exclude checksum
+		h.Write(b[8:]) // exclude status
 	}
 	copy(c[:], h.Sum(buf[:0]))
 	return
@@ -117,27 +128,32 @@ func (t *Transaction) commit() error {
 		return t.initErr
 	}
 
-	// set the status of the first page first
-	t.firstPage.pageStatus = pageStatusComitted
+	// Set the transaction status
+	t.status = txnStatusComitted
 
-	// Set the transaction number of the first page and increase the transactionCounter of the wal
-	t.firstPage.transactionNumber = atomic.AddUint64(&t.wal.atomicNextTxnNum, 1) - 1
+	// Set the sequence number and increase the WAL's transactionCounter
+	t.sequenceNumber = atomic.AddUint64(&t.wal.atomicNextTxnNum, 1) - 1
 
-	// calculate the checksum
-	t.firstPage.transactionChecksum = t.checksum()
+	// Calculate the checksum
+	checksum := t.checksum()
 
-	// Finalize the commit by writing the first page with the updated status if
-	// there have been no errors so far.
 	if t.wal.deps.disrupt("CommitFail") {
-		// Disk failure causes the commit to fail
 		return errors.New("Write failed on purpose")
 	}
+
+	// Marshal metadata into buffer
 	buf := bufPool.Get().([]byte)
-	_, err := t.wal.logFile.WriteAt(t.firstPage.appendTo(buf[:0]), int64(t.firstPage.offset))
+	binary.LittleEndian.PutUint64(buf[:], t.status)
+	binary.LittleEndian.PutUint64(buf[8:], t.sequenceNumber)
+	copy(buf[16:], checksum[:])
+
+	// Finalize the commit by writing the metadata to disk.
+	_, err := t.wal.logFile.WriteAt(buf[:16+checksumSize], int64(t.firstPage.offset))
 	bufPool.Put(buf)
 	if err != nil {
 		return errors.Extend(err, errors.New("Writing the first page failed"))
 	}
+
 	if err := t.wal.fSync(); err != nil {
 		return errors.Extend(err, errors.New("Writing the first page failed"))
 	}
@@ -152,7 +168,6 @@ func marshalUpdates(updates []Update) []byte {
 	var size int
 	for _, u := range updates {
 		size += 8 + len(u.Name)
-		size += 8 + len(u.Version)
 		size += 8 + len(u.Instructions)
 	}
 	buf := make([]byte, size)
@@ -163,10 +178,6 @@ func marshalUpdates(updates []Update) []byte {
 		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Name)))
 		n += 8
 		n += copy(buf[n:], u.Name)
-		// u.Version
-		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Version)))
-		n += 8
-		n += copy(buf[n:], u.Version)
 		// u.Instructions
 		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Instructions)))
 		n += 8
@@ -203,11 +214,6 @@ func unmarshalUpdates(data []byte) ([]Update, error) {
 			return nil, errors.New("failed to unmarshal name")
 		}
 
-		version, ok := nextPrefix(buf)
-		if !ok {
-			return nil, errors.New("failed to unmarshal version")
-		}
-
 		instructions, ok := nextPrefix(buf)
 		if !ok {
 			return nil, errors.New("failed to unmarshal instructions")
@@ -215,7 +221,6 @@ func unmarshalUpdates(data []byte) ([]Update, error) {
 
 		updates = append(updates, Update{
 			Name:         string(name),
-			Version:      string(version),
 			Instructions: instructions,
 		})
 	}
@@ -223,61 +228,71 @@ func unmarshalUpdates(data []byte) ([]Update, error) {
 	return updates, nil
 }
 
-// threadedInitTransaction reserves pages of the wal, marshalls the
-// transactions's updates into a payload and splits the payload equally among
-// the pages. Once finished those pages are written to disk and the transaction
-// is committed.
-func initTransaction(t *Transaction) {
+// threadedInitTransaction reserves pages of the wal, marshals the
+// transactions's updates into a payload, and splits the payload equally among
+// the pages. It then writes the transaction metadata and pages to disk.
+func threadedInitTransaction(t *Transaction) {
 	defer close(t.initComplete)
 
 	// Marshal all the updates to get their total length on disk
 	data := marshalUpdates(t.Updates)
 
-	// Get the pages from the wal and set the first page's status
-	pages := t.wal.managedReservePages(data)
-	pages[0].pageStatus = pageStatusWritten
+	// Get the pages from the wal and set the status
+	//
+	// NOTE: managedReservePages only returns pages that contain up to
+	// MaxPayloadSize bytes. However, the first page can only contain
+	// maxFirstPayloadSize bytes. To rectify this, we reserve pages separately
+	// for the first page and the remainder, and join them together.
+	if len(data) > maxFirstPayloadSize {
+		t.firstPage = t.wal.managedReservePages(data[:maxFirstPayloadSize])
+		t.firstPage.nextPage = t.wal.managedReservePages(data[maxFirstPayloadSize:])
+	} else {
+		t.firstPage = t.wal.managedReservePages(data)
+	}
+	t.status = txnStatusWritten
 
-	// Set the first page of the transaction
-	t.firstPage = &pages[0]
-
-	// write the pages to disk
-	if err := t.writeToFile(); err != nil {
-		t.initErr = errors.Extend(err, errors.New("Couldn't write the page to file"))
+	// write the metadata and first page
+	buf := make([]byte, pageSize)
+	binary.LittleEndian.PutUint64(buf[:], t.status)
+	binary.LittleEndian.PutUint64(buf[8:], t.sequenceNumber)
+	var c checksum // checksum is left blank until transaction is committed
+	n := copy(buf[16:], c[:])
+	binary.LittleEndian.PutUint64(buf[n+16:], t.firstPage.nextOffset())
+	binary.LittleEndian.PutUint64(buf[n+24:], uint64(len(t.firstPage.payload)))
+	copy(buf[n+32:], t.firstPage.payload)
+	if _, err := t.wal.logFile.WriteAt(buf, int64(t.firstPage.offset)); err != nil {
+		t.initErr = errors.Extend(err, errors.New("Writing the first page to disk failed"))
 		return
 	}
-}
-
-// validateChecksum checks if a transaction has been corrupted by computing a hash
-// and comparing it to the one in the firstPage of the transaction
-func (t Transaction) validateChecksum() error {
-	if t.firstPage == nil {
-		return errors.New("firstPage is nil")
-	} else if t.checksum() != t.firstPage.transactionChecksum {
-		return errors.New("checksum not valid")
+	// write subsequent pages
+	for page := t.firstPage.nextPage; page != nil; page = page.nextPage {
+		b := page.appendTo(buf[:0])
+		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
+			t.initErr = errors.Extend(err, errors.New("Writing the page to disk failed"))
+			return
+		}
 	}
-	return nil
 }
 
-// SignalUpdatesApplied  informs the WAL that it is safe to free the used pages to reuse them in a new transaction
+// SignalUpdatesApplied informs the WAL that it is safe to reuse t's pages.
 func (t *Transaction) SignalUpdatesApplied() error {
 	if !t.setupComplete || !t.commitComplete || t.releaseComplete {
 		return errors.New("misuse of transaction - call each of the signaling methods exactly once, in serial, in order")
 	}
 	t.releaseComplete = true
 
-	// Set the page status to applied
-	t.firstPage.pageStatus = pageStatusApplied
+	// Set the status to applied
+	t.status = txnStatusApplied
 
-	// Write the page to disk
-	var err error
+	// Write the status to disk
 	if t.wal.deps.disrupt("ReleaseFail") {
-		// Disk failure causes the commit to fail
-		err = errors.New("Write failed on purpose")
-	} else {
-		buf := bufPool.Get().([]byte)
-		_, err = t.wal.logFile.WriteAt(t.firstPage.appendTo(buf[:0]), int64(t.firstPage.offset))
-		bufPool.Put(buf)
+		return errors.New("Write failed on purpose")
 	}
+
+	buf := bufPool.Get().([]byte)
+	binary.LittleEndian.PutUint64(buf, t.status)
+	_, err := t.wal.logFile.WriteAt(buf[:8], int64(t.firstPage.offset))
+	bufPool.Put(buf)
 	if err != nil {
 		return errors.Extend(err, errors.New("Couldn't write the page to file"))
 	}
@@ -318,7 +333,7 @@ func (t *Transaction) append(updates []Update) (err error) {
 	// Marshal the data
 	data := marshalUpdates(updates)
 
-	// Find last page to which we append and count the pages
+	// Find last page, to which we will append
 	lastPage := t.firstPage
 	for lastPage.nextPage != nil {
 		lastPage = lastPage.nextPage
@@ -326,7 +341,6 @@ func (t *Transaction) append(updates []Update) (err error) {
 
 	// Preserve the original payload of the last page and the original updates
 	// of the transaction if an error occurs
-	buf := make([]byte, pageSize)
 	defer func() {
 		if err != nil {
 			lastPage.payload = lastPage.payload[:len(lastPage.payload)]
@@ -334,14 +348,20 @@ func (t *Transaction) append(updates []Update) (err error) {
 			lastPage.nextPage = nil
 
 			// Write last page
-			b := lastPage.appendTo(buf[:0])
-			_, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset))
+			err = t.writePage(lastPage)
 			err = errors.Compose(err, errors.Extend(err, errors.New("Writing the last page to disk failed")))
 		}
 	}()
 
 	// Write as much data to the last page as possible
-	lenDiff := MaxPayloadSize - len(lastPage.payload)
+	var lenDiff int
+	if lastPage == t.firstPage {
+		// firstPage holds less data than subsequent pages
+		lenDiff = maxFirstPayloadSize - len(lastPage.payload)
+	} else {
+		lenDiff = MaxPayloadSize - len(lastPage.payload)
+	}
+
 	if len(data) <= lenDiff {
 		lastPage.payload = append(lastPage.payload, data...)
 		data = nil
@@ -350,29 +370,33 @@ func (t *Transaction) append(updates []Update) (err error) {
 		data = data[lenDiff:]
 	}
 
-	// If there is no more data we only have to update the last page on disk
-	if data == nil {
-		b := lastPage.appendTo(buf[:0])
-		if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
+	// If there is no more data to write, we don't need to allocate any new
+	// pages. Write the new last page to disk and append the new updates.
+	if len(data) == 0 {
+		if err := t.writePage(lastPage); err != nil {
 			return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 		}
+		t.Updates = append(t.Updates, updates...)
 		return nil
 	}
 
 	// Get enough pages for the remaining data
-	pages := t.wal.managedReservePages(data)
-	lastPage.nextPage = &pages[0]
+	lastPage.nextPage = t.wal.managedReservePages(data)
 
-	// Write the new pages to disk
-	for _, page := range pages {
+	// Write the new pages, then write the tail page that links to them.
+	// Writing in this order ensures that if writing the new pages fails, the
+	// old tail page remains valid.
+	buf := bufPool.Get().([]byte)
+	for page := lastPage.nextPage; page != nil; page = page.nextPage {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
 			return errors.Extend(err, errors.New("Writing the page to disk failed"))
 		}
 	}
-	// Link the new pages to the last one
-	b := lastPage.appendTo(buf[:0])
-	if _, err := t.wal.logFile.WriteAt(b, int64(lastPage.offset)); err != nil {
+	bufPool.Put(buf)
+
+	// write last page
+	if err := t.writePage(lastPage); err != nil {
 		return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 	}
 
@@ -415,7 +439,23 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 	return done
 }
 
-// NewTransaction creates a transaction from a set of updates
+// writePage is a helper function that writes a page of a transaction to the
+// correct offset.
+func (t *Transaction) writePage(page *page) error {
+	buf := bufPool.Get().([]byte)
+	defer bufPool.Put(buf)
+
+	// Adjust offset if page is the first page of the transaction
+	offset := page.offset
+	if page == t.firstPage {
+		offset += firstPageMetaSize - pageMetaSize
+	}
+
+	_, err := t.wal.logFile.WriteAt(page.appendTo(buf[:0]), int64(offset))
+	return err
+}
+
+// NewTransaction creates a transaction from a set of updates.
 func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	if !w.recoveryComplete {
 		return nil, errors.New("can't call NewTransaction before recovery is complete")
@@ -426,7 +466,7 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	}
 
 	// Create new transaction
-	newTransaction := Transaction{
+	txn := &Transaction{
 		Updates:      updates,
 		wal:          w,
 		initComplete: make(chan struct{}),
@@ -434,23 +474,10 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 
 	// Initialize the transaction by splitting up the payload among free pages
 	// and writing them to disk.
-	go initTransaction(&newTransaction)
+	go threadedInitTransaction(txn)
 
 	// Increase the number of active transaction
 	atomic.AddInt64(&w.atomicUnfinishedTxns, 1)
 
-	return &newTransaction, nil
-}
-
-// writeToFile writes all the pages of the transaction to disk
-func (t *Transaction) writeToFile() error {
-	buf := bufPool.Get().([]byte)
-	defer bufPool.Put(buf)
-	for page := t.firstPage; page != nil; page = page.nextPage {
-		b := page.appendTo(buf[:0])
-		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
-			return errors.Extend(err, errors.New("Writing the page to disk failed"))
-		}
-	}
-	return nil
+	return txn, nil
 }
