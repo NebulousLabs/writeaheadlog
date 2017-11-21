@@ -242,6 +242,16 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 			firstPage.nextPage = &nextDiskPage.page
 		}
 
+		// Check if the pages of the transaction form a loop
+		visited := make(map[uint64]struct{})
+		for page := firstPage; page != nil; page = page.nextPage {
+			if _, exists := visited[page.offset]; exists {
+				// Loop detected
+				continue
+			}
+			visited[page.offset] = struct{}{}
+		}
+
 		txn := Transaction{
 			status:         status,
 			sequenceNumber: seq,
