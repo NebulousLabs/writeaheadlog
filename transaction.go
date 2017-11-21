@@ -365,13 +365,7 @@ func (t *Transaction) append(updates []Update) (err error) {
 			lastPage.nextPage = nil
 
 			// Write last page
-			offset := lastPage.offset
-			if lastPage == t.firstPage {
-				offset += firstPageMetaSize - pageMetaSize
-			}
-			buf := bufPool.Get().([]byte)
-			_, err := t.wal.logFile.WriteAt(lastPage.appendTo(buf[:0]), int64(offset))
-			bufPool.Put(buf)
+			err = t.writePage(lastPage)
 			err = errors.Compose(err, errors.Extend(err, errors.New("Writing the last page to disk failed")))
 		}
 	}()
@@ -396,10 +390,7 @@ func (t *Transaction) append(updates []Update) (err error) {
 	// If there is no more data to write, we don't need to allocate any new
 	// pages. Write the new last page to disk and append the new updates.
 	if len(data) == 0 {
-		buf := bufPool.Get().([]byte)
-		_, err := t.wal.logFile.WriteAt(lastPage.appendTo(buf[:0]), int64(lastPage.offset))
-		bufPool.Put(buf)
-		if err != nil {
+		if err := t.writePage(lastPage); err != nil {
 			return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 		}
 		t.Updates = append(t.Updates, updates...)
@@ -413,21 +404,16 @@ func (t *Transaction) append(updates []Update) (err error) {
 	// Writing in this order ensures that if writing the new pages fails, the
 	// old tail page remains valid.
 	buf := bufPool.Get().([]byte)
-	defer bufPool.Put(buf)
 	for page := lastPage.nextPage; page != nil; page = page.nextPage {
 		b := page.appendTo(buf[:0])
 		if _, err := t.wal.logFile.WriteAt(b, int64(page.offset)); err != nil {
 			return errors.Extend(err, errors.New("Writing the page to disk failed"))
 		}
 	}
+	bufPool.Put(buf)
 
-	// if writing first page, need to adjust offset
-	b := lastPage.appendTo(buf[:0])
-	offset := lastPage.offset
-	if lastPage == t.firstPage {
-		offset += firstPageMetaSize - pageMetaSize
-	}
-	if _, err := t.wal.logFile.WriteAt(b, int64(offset)); err != nil {
+	// write last page
+	if err := t.writePage(lastPage); err != nil {
 		return errors.Extend(err, errors.New("Writing the last page to disk failed"))
 	}
 
@@ -468,6 +454,22 @@ func (t *Transaction) SignalSetupComplete() <-chan error {
 		done <- t.commit()
 	}()
 	return done
+}
+
+// writePage is a helper function that writes a page of a transaction to the
+// correct offset.
+func (t *Transaction) writePage(page *page) error {
+	buf := bufPool.Get().([]byte)
+	defer bufPool.Put(buf)
+
+	// Adjust offset if page is the first page of the transaction
+	offset := page.offset
+	if page == t.firstPage {
+		offset += firstPageMetaSize - pageMetaSize
+	}
+
+	_, err := t.wal.logFile.WriteAt(page.appendTo(buf[:0]), int64(offset))
+	return err
 }
 
 // NewTransaction creates a transaction from a set of updates.
