@@ -130,7 +130,6 @@ func TestCommitFailed(t *testing.T) {
 	updates := []Update{}
 	updates = append(updates, Update{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(1234),
 	})
 
@@ -179,7 +178,6 @@ func BenchmarkMarshalUpdates(b *testing.B) {
 	for i := range updates {
 		updates[i] = Update{
 			Name:         "test",
-			Version:      "1.0",
 			Instructions: fastrand.Bytes(1234),
 		}
 	}
@@ -195,7 +193,6 @@ func BenchmarkUnmarshalUpdates(b *testing.B) {
 	for i := range updates {
 		updates[i] = Update{
 			Name:         "test",
-			Version:      "1.0",
 			Instructions: fastrand.Bytes(1234),
 		}
 	}
@@ -222,7 +219,6 @@ func TestReleaseFailed(t *testing.T) {
 	updates := []Update{}
 	updates = append(updates, Update{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(1234),
 	})
 
@@ -276,7 +272,6 @@ func TestReleaseNotCalled(t *testing.T) {
 	updates := []Update{}
 	updates = append(updates, Update{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(1234),
 	})
 	// Create one transaction which will be committed and one that will be applied
@@ -338,7 +333,6 @@ func TestPayloadCorrupted(t *testing.T) {
 	updates := []Update{}
 	updates = append(updates, Update{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(1234),
 	})
 
@@ -403,7 +397,6 @@ func TestPayloadCorrupted2(t *testing.T) {
 	updates := []Update{}
 	updates = append(updates, Update{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(1234),
 	})
 
@@ -469,7 +462,6 @@ func TestWalParallel(t *testing.T) {
 	updates := []Update{}
 	updates = append(updates, Update{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(1234),
 	})
 
@@ -550,7 +542,6 @@ func TestPageRecycling(t *testing.T) {
 	updates := []Update{}
 	updates = append(updates, Update{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(5000),
 	})
 
@@ -732,7 +723,6 @@ func TestRecoveryFailed(t *testing.T) {
 	for i := 0; i < numUpdates; i++ {
 		updates = append(updates, Update{
 			Name:         "test",
-			Version:      "1.0",
 			Instructions: fastrand.Bytes(10000),
 		})
 	}
@@ -816,7 +806,6 @@ func TestTransactionAppend(t *testing.T) {
 	// Create a transaction with 1 update
 	updates := []Update{{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(3000),
 	}}
 	txn, err := wt.wal.NewTransaction(updates)
@@ -869,7 +858,6 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int, appendUpdate bool) 
 	updates := []Update{}
 	updates = append(updates, Update{
 		Name:         "test",
-		Version:      "1.0",
 		Instructions: fastrand.Bytes(4000), // 1 page / txn
 	})
 

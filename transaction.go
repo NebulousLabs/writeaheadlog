@@ -28,12 +28,6 @@ type Update struct {
 	// run on the the update based on the name and version.
 	Name string
 
-	// The version of the update type. Update types and implementations can be
-	// tweaked over time, and a version field allows for easy compatibility
-	// between releases, even if an upgrade occurs between an unclean shutdown
-	// and a reload.
-	Version string
-
 	// The marshalled data directing the update. The data is an opaque set of
 	// instructions to follow that implement and idempotent change to a set of
 	// persistent files. A series of unclean shutdowns in rapid succession could
@@ -174,7 +168,6 @@ func marshalUpdates(updates []Update) []byte {
 	var size int
 	for _, u := range updates {
 		size += 8 + len(u.Name)
-		size += 8 + len(u.Version)
 		size += 8 + len(u.Instructions)
 	}
 	buf := make([]byte, size)
@@ -185,10 +178,6 @@ func marshalUpdates(updates []Update) []byte {
 		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Name)))
 		n += 8
 		n += copy(buf[n:], u.Name)
-		// u.Version
-		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Version)))
-		n += 8
-		n += copy(buf[n:], u.Version)
 		// u.Instructions
 		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Instructions)))
 		n += 8
@@ -225,11 +214,6 @@ func unmarshalUpdates(data []byte) ([]Update, error) {
 			return nil, errors.New("failed to unmarshal name")
 		}
 
-		version, ok := nextPrefix(buf)
-		if !ok {
-			return nil, errors.New("failed to unmarshal version")
-		}
-
 		instructions, ok := nextPrefix(buf)
 		if !ok {
 			return nil, errors.New("failed to unmarshal instructions")
@@ -237,7 +221,6 @@ func unmarshalUpdates(data []byte) ([]Update, error) {
 
 		updates = append(updates, Update{
 			Name:         string(name),
-			Version:      string(version),
 			Instructions: instructions,
 		})
 	}
