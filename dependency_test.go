@@ -33,20 +33,9 @@ func newFaultyDiskDependency(writeLimit uint64) faultyDiskDependency {
 	}
 }
 
-func (*faultyDiskDependency) disrupt(s string) bool {
-	return s == "FaultyDisk"
-}
-func (*faultyDiskDependency) readFile(path string) ([]byte, error) {
-	return ioutil.ReadFile(path)
-}
-func (d *faultyDiskDependency) openFile(path string, flag int, perm os.FileMode) (file, error) {
-	f, err := os.OpenFile(path, flag, perm)
-	if err != nil {
-		return nil, err
-	}
-	return d.newFaultyFile(f), nil
-}
 func (d *faultyDiskDependency) create(path string) (file, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.failed {
 		return nil, errors.New("failed to create file (faulty disk)")
 	}
@@ -56,6 +45,24 @@ func (d *faultyDiskDependency) create(path string) (file, error) {
 		return nil, err
 	}
 	return d.newFaultyFile(f), nil
+}
+
+// disabled allows the caller to temporarily disable the dependency
+func (d *faultyDiskDependency) disable(b bool) {
+	d.mu.Lock()
+	d.disabled = b
+	d.mu.Unlock()
+}
+func (*faultyDiskDependency) disrupt(s string) bool {
+	return s == "FaultyDisk"
+}
+
+// newFaultyFile creates a new faulty file around the provided file handle.
+func (d *faultyDiskDependency) newFaultyFile(f *os.File) *faultyFile {
+	return &faultyFile{d: d, file: f}
+}
+func (*faultyDiskDependency) readFile(path string) ([]byte, error) {
+	return ioutil.ReadFile(path)
 }
 func (d *faultyDiskDependency) remove(path string) error {
 	d.mu.Lock()
@@ -73,6 +80,21 @@ func (d *faultyDiskDependency) remove(path string) error {
 	}
 
 	return os.Remove(path)
+}
+
+// reset resets the failDenominator and the failed flag of the dependency
+func (d *faultyDiskDependency) reset() {
+	d.mu.Lock()
+	d.failDenominator = 3
+	d.failed = false
+	d.mu.Unlock()
+}
+func (d *faultyDiskDependency) openFile(path string, flag int, perm os.FileMode) (file, error) {
+	f, err := os.OpenFile(path, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return d.newFaultyFile(f), nil
 }
 
 // faultyFile implements a file that simulates a faulty disk.
@@ -137,26 +159,6 @@ func (f *faultyFile) Sync() error {
 		return errors.New("could not write to disk (faultyDisk)")
 	}
 	return f.file.Sync()
-}
-
-// newFaultyFile creates a new faulty file around the provided file handle.
-func (d *faultyDiskDependency) newFaultyFile(f *os.File) *faultyFile {
-	return &faultyFile{d: d, file: f}
-}
-
-// reset resets the failDenominator and the failed flag of the dependency
-func (d *faultyDiskDependency) reset() {
-	d.mu.Lock()
-	d.failDenominator = 3
-	d.failed = false
-	d.mu.Unlock()
-}
-
-// disabled allows the caller to temporarily disable the dependency
-func (d *faultyDiskDependency) disable(b bool) {
-	d.mu.Lock()
-	d.disabled = b
-	d.mu.Unlock()
 }
 
 // dependencyCommitFail corrupts the first page of a transaction when it

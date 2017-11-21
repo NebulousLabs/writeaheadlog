@@ -373,8 +373,20 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 // TestSilo is an integration test that is supposed to test all the features of
 // the WAL in a single testcase. It uses 100 silos updating 1000 times each.
 func TestSilo(t *testing.T) {
+	// Declare some vars to configure the loop
+	var wg sync.WaitGroup
+	numSilos := int64(250)
+	numIncrease := 20
+	maxCntr := 50
+	numRetries := 100
+	counters := make([]int, maxCntr, maxCntr)
+	endTime := time.Now().Add(5 * time.Minute)
+	iters := 0
+	maxTries := 0
+
 	if testing.Short() {
-		t.SkipNow()
+		// Test should only run 10 seconds.
+		endTime = time.Now().Add(10 * time.Second)
 	}
 
 	deps := newFaultyDiskDependency(5000)
@@ -387,17 +399,6 @@ func TestSilo(t *testing.T) {
 
 	// Disable dependencies for the initial files
 	deps.disable(true)
-
-	// Declare some vars to configure the loop
-	var wg sync.WaitGroup
-	numSilos := int64(250)
-	numIncrease := 20
-	maxCntr := 50
-	numRetries := 100
-	counters := make([]int, maxCntr, maxCntr)
-	endTime := time.Now().Add(5 * time.Minute)
-	iters := 0
-	maxTries := 0
 
 	// Write silos, pull the plug and verify repeatedly
 	for cntr := 0; cntr < maxCntr; cntr++ {
