@@ -3,6 +3,8 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
+	"log"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -25,7 +27,8 @@ type Update struct {
 	// The name of the update type. When the WAL is loaded after an unclean
 	// shutdown, any un-committed changes will be passed as Updates back to the
 	// caller instantiating the WAL. The caller should determine what code to
-	// run on the the update based on the name and version.
+	// run on the the update based on the name and version. The length of the
+	// Name is capped to 255 bytes
 	Name string
 
 	// The marshalled data directing the update. The data is an opaque set of
@@ -164,10 +167,18 @@ func (t *Transaction) commit() error {
 
 // marshalUpdates marshals the updates of a transaction
 func marshalUpdates(updates []Update) []byte {
+	// Declare helper function to find minimum
+	min := func(a, b int) int {
+		if a < b {
+			return a
+		}
+		return b
+	}
+
 	// preallocate buffer of appropriate size
 	var size int
 	for _, u := range updates {
-		size += 8 + len(u.Name)
+		size += 1 + min(len(u.Name), math.MaxUint8)
 		size += 8 + len(u.Instructions)
 	}
 	buf := make([]byte, size)
@@ -175,9 +186,10 @@ func marshalUpdates(updates []Update) []byte {
 	var n int
 	for _, u := range updates {
 		// u.Name
-		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Name)))
-		n += 8
-		n += copy(buf[n:], u.Name)
+		nameLen := min(len(u.Name), math.MaxUint8)
+		buf[n] = byte(nameLen)
+		n++
+		n += copy(buf[n:], u.Name[:nameLen])
 		// u.Instructions
 		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Instructions)))
 		n += 8
@@ -186,22 +198,39 @@ func marshalUpdates(updates []Update) []byte {
 	return buf
 }
 
+// nextPrefix is a helper function that reads the next prefix of prefixLen and
+// prefixed data from a buffer and returns the data and a bool to indicate
+// success.
+func nextPrefix(prefixLen int, buf *bytes.Buffer) ([]byte, bool) {
+	log.Print(prefixLen)
+	if buf.Len() < prefixLen {
+		// missing length prefix
+		return nil, false
+	}
+	var l int
+	switch prefixLen {
+	case 8:
+		l = int(binary.LittleEndian.Uint64(buf.Next(prefixLen)))
+	case 4:
+		l = int(binary.LittleEndian.Uint32(buf.Next(prefixLen)))
+	case 2:
+		l = int(binary.LittleEndian.Uint16(buf.Next(prefixLen)))
+	case 1:
+		l = int(buf.Next(prefixLen)[0])
+	default:
+		return nil, false
+	}
+	if l < 0 || l > buf.Len() {
+		// invalid length prefix
+		return nil, false
+	}
+	return buf.Next(l), true
+}
+
 // unmarshalUpdates unmarshals the updates of a transaction
 func unmarshalUpdates(data []byte) ([]Update, error) {
 	// helper function for reading length-prefixed data
 	buf := bytes.NewBuffer(data)
-	nextPrefix := func(buf *bytes.Buffer) ([]byte, bool) {
-		if buf.Len() < 8 {
-			// missing length prefix
-			return nil, false
-		}
-		l := int(binary.LittleEndian.Uint64(buf.Next(8)))
-		if l < 0 || l > buf.Len() {
-			// invalid length prefix
-			return nil, false
-		}
-		return buf.Next(l), true
-	}
 
 	var updates []Update
 	for {
@@ -209,12 +238,12 @@ func unmarshalUpdates(data []byte) ([]Update, error) {
 			break
 		}
 
-		name, ok := nextPrefix(buf)
+		name, ok := nextPrefix(1, buf)
 		if !ok {
 			return nil, errors.New("failed to unmarshal name")
 		}
 
-		instructions, ok := nextPrefix(buf)
+		instructions, ok := nextPrefix(8, buf)
 		if !ok {
 			return nil, errors.New("failed to unmarshal instructions")
 		}
