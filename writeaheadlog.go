@@ -192,16 +192,16 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 	}
 	pageSet := make(map[uint64]*diskPage) // keyed by offset
 	for i := uint64(pageSize); i+pageMetaSize < uint64(len(data)); i += pageSize {
-		status := binary.LittleEndian.Uint64(data[i:])
-		if status != txnStatusPage {
+		nextOffset := binary.LittleEndian.Uint64(data[i:])
+		if nextOffset < pageSize {
+			// nextOffset is actually a transaction status
 			continue
 		}
-		nextOffset := binary.LittleEndian.Uint64(data[i+8:])
-		payloadSize := binary.LittleEndian.Uint64(data[i+16:])
+		payloadSize := binary.LittleEndian.Uint64(data[i+8:])
 		if payloadSize > MaxPayloadSize {
 			continue
 		}
-		payload := data[i+24 : i+24+payloadSize]
+		payload := data[i+16 : i+16+payloadSize]
 
 		pageSet[i] = &diskPage{
 			page: page{
