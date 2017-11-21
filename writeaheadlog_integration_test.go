@@ -106,7 +106,6 @@ func (su *siloUpdate) unmarshal(data []byte) {
 func (su *siloUpdate) newUpdate() Update {
 	update := Update{
 		Name:         "This is my update. There are others like it but this one is mine",
-		Version:      "v0.9.8.7.6.5.4.3.2.1.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z",
 		Instructions: su.marshal(),
 	}
 	return update
