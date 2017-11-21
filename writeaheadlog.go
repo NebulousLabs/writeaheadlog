@@ -201,7 +201,7 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 		if payloadSize > MaxPayloadSize {
 			continue
 		}
-		payload := data[i+16 : i+16+payloadSize]
+		payload := data[i+pageMetaSize : i+pageMetaSize+payloadSize]
 
 		pageSet[i] = &diskPage{
 			page: page{
