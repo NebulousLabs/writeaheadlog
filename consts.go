@@ -3,7 +3,7 @@ package writeaheadlog
 const (
 	checksumSize = 16
 	pageSize     = 4096
-	pageMetaSize = 2 * 8 // 2 uint64s: nextPage offset, and payload size
+	pageMetaSize = 8 // nextPage offset
 
 	// MaxPayloadSize is the number of bytes that can fit into a single
 	// page. For best performance, the number of pages written should be
@@ -13,8 +13,8 @@ const (
 
 	// firstPageMetaSize is the size of the marshalled non-payload data of a
 	// transaction's firstPage. It includes the txnStatus, sequence number,
-	// checksum, nextPage offset, and payload size.
-	firstPageMetaSize = 8 + 8 + checksumSize + 8 + 8
+	// checksum, and nextPage offset.
+	firstPageMetaSize = 8 + 8 + checksumSize + 8
 
 	// maxFirstPayloadSize is the number of bytes that can fit into the first
 	// page of a transaction. The first page holds more metadata than the

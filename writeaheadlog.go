@@ -191,22 +191,16 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 		nextPageOffset uint64
 	}
 	pageSet := make(map[uint64]*diskPage) // keyed by offset
-	for i := uint64(pageSize); i+pageMetaSize < uint64(len(data)); i += pageSize {
+	for i := uint64(pageSize); i+pageSize <= uint64(len(data)); i += pageSize {
 		nextOffset := binary.LittleEndian.Uint64(data[i:])
 		if nextOffset < pageSize {
 			// nextOffset is actually a transaction status
 			continue
 		}
-		payloadSize := binary.LittleEndian.Uint64(data[i+8:])
-		if payloadSize > MaxPayloadSize {
-			continue
-		}
-		payload := data[i+pageMetaSize : i+pageMetaSize+payloadSize]
-
 		pageSet[i] = &diskPage{
 			page: page{
 				offset:  i,
-				payload: payload,
+				payload: data[i+pageMetaSize : i+pageSize],
 			},
 			nextPageOffset: nextOffset,
 		}
@@ -222,7 +216,7 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 	// reconstruct transactions
 	var txns []Transaction
 nextTxn:
-	for i := pageSize; i+firstPageMetaSize < len(data); i += pageSize {
+	for i := pageSize; i+pageSize <= len(data); i += pageSize {
 		status := binary.LittleEndian.Uint64(data[i:])
 		if status != txnStatusComitted {
 			continue
@@ -232,12 +226,8 @@ nextTxn:
 		var diskChecksum checksum
 		n := copy(diskChecksum[:], data[i+16:])
 		nextPageOffset := binary.LittleEndian.Uint64(data[i+16+n:])
-		payloadSize := binary.LittleEndian.Uint64(data[i+16+n+8:])
-		if payloadSize > maxFirstPayloadSize {
-			continue
-		}
 		firstPage := &page{
-			payload: data[i+firstPageMetaSize : i+firstPageMetaSize+int(payloadSize)],
+			payload: data[i+firstPageMetaSize : i+pageSize],
 		}
 		if nextDiskPage, ok := pageSet[nextPageOffset]; ok {
 			firstPage.nextPage = &nextDiskPage.page
