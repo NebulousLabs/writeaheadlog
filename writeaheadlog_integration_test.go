@@ -7,8 +7,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"io/ioutil"
-	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -282,7 +282,6 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 		if err := txn.SignalUpdatesApplied(); err != nil {
 			return
 		}
-
 		// Reset
 		sus = sus[:0]
 		updates = updates[:0]
@@ -291,7 +290,7 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 
 // recoverSiloWAL recovers the WAL after a crash. This will be called
 // repeatedly until it finishes.
-func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, testdir string, file file, numSilos int64, numIncrease int) (err error) {
+func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]*silo, testdir string, file file, numSilos int64, numIncrease int) (err error) {
 	// Reload wal.
 	updates, wal, err := newWal(walPath, deps)
 	if err != nil {
@@ -369,110 +368,115 @@ func recoverSiloWAL(walPath string, deps dependencies, silos map[int64]*silo, te
 	return nil
 }
 
+// newSiloDatabase will create a silo database that overwrites any existing
+// silo database.
+func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, numSilos int64, numIncrease int) (map[int64]*silo, *WAL, file, error) {
+	// Disable the dependencies during the reset.
+	deps.disable()
+	defer deps.enable()
+
+	// Create new fake database file
+	file, err := deps.create(dbPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Create a new wal.
+	updates, wal, err := newWal(walPath, deps)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(updates) > 0 || wal.recoveryComplete == false {
+		return nil, nil, nil, fmt.Errorf("len(updates) was %v and recoveryComplete was %v", len(updates), wal.recoveryComplete)
+	}
+
+	// Create and initialize the silos.
+	var siloOffset int64
+	var siloOffsets []int64
+	var silos = make(map[int64]*silo)
+	for i := 0; int64(i) < numSilos; i++ {
+		silo := newSilo(siloOffset, 1+i*numIncrease, deps, file)
+		if err := silo.init(); err != nil {
+			return nil, nil, nil, errors.Extend(errors.New("failed to init silo"), err)
+		}
+		siloOffsets = append(siloOffsets, siloOffset)
+		silos[siloOffset] = silo
+		siloOffset += int64(len(silo.numbers)*4) + checksumSize
+	}
+	return silos, wal, file, nil
+}
+
 // TestSilo is an integration test that is supposed to test all the features of
 // the WAL in a single testcase. It uses 100 silos updating 1000 times each.
 func TestSilo(t *testing.T) {
 	// Declare some vars to configure the loop
-	var wg sync.WaitGroup
 	numSilos := int64(250)
 	numIncrease := 20
 	maxCntr := 50
-	numRetries := 100
 	counters := make([]int, maxCntr, maxCntr)
 	endTime := time.Now().Add(5 * time.Minute)
 	iters := 0
 	maxTries := 0
-
+	// Test should only run 10 seconds in short mode.
 	if testing.Short() {
-		// Test should only run 10 seconds.
 		endTime = time.Now().Add(10 * time.Second)
 	}
 
-	deps := newFaultyDiskDependency(5000)
+	// Create the folder and establis hthe filepaths.
+	deps := newFaultyDiskDependency(100e3)
 	testdir := tempDir("wal", t.Name())
+	os.MkdirAll(testdir, 0777)
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
 
-	// Create the test dir
-	os.MkdirAll(testdir, 0777)
-
-	// Disable dependencies for the initial files
-	deps.disable(true)
+	// Create the silo database.
+	silos, wal, file, err := newSiloDatabase(deps, dbPath, walPath, numSilos, numIncrease)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Write silos, pull the plug and verify repeatedly
 	for cntr := 0; cntr < maxCntr; cntr++ {
+		println("JUMP")
 		if time.Now().After(endTime) {
 			// Stop if test takes too long
 			break
 		}
-		deps.disable(true)
-
-		// Create new fake database file
-		os.Remove(dbPath)
-		file, err := deps.create(dbPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// Create wal with disabled dependencies
-		updates, wal, err := newWal(walPath, &deps)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(updates) > 0 || wal.recoveryComplete == false {
-			t.Fatalf("len(updates) was %v and recoveryComplete was %v",
-				len(updates), wal.recoveryComplete)
-		}
-
-		// Reset dependencies and increase the write limit to allow for higher
-		// success rate
+		// Reset the dependencies.
 		deps.reset()
-		deps.writeLimit = 5000
 
-		var siloOff int64
-		var siloOffsets []int64
-		var silos = make(map[int64]*silo)
-
-		// Start the threaded update after creating and initializing the silos
-		for i := 0; int64(i) < numSilos; i++ {
-			wg.Add(1)
-			silo := newSilo(siloOff, 1+i*numIncrease, &deps, file)
-			if err := silo.init(); err != nil {
-				t.Fatalf("Failed to init silo: %v", err)
+		// Nondeterministically call a function to completely reset the
+		// database + silos.
+		if fastrand.Intn(3) == 0 {
+			silos, wal, file, err = newSiloDatabase(deps, dbPath, walPath, numSilos, numIncrease)
+			if err != nil {
+				t.Fatal(err)
 			}
-
-			go silo.threadedUpdate(t, wal, testdir, &wg)
-			siloOffsets = append(siloOffsets, siloOff)
-			silos[siloOff] = silo
-			siloOff += int64(len(silo.numbers)*4) + checksumSize
 		}
 
-		// Corrupt the disk
-		deps.disable(false)
-
+		// Spin up all of the silo threads.
+		var wg sync.WaitGroup
+		for _, silo := range silos {
+			wg.Add(1)
+			go silo.threadedUpdate(t, wal, testdir, &wg)
+		}
 		// Wait for all the threads to fail
 		wg.Wait()
-
-		// Close wal
+		// Close wal.
 		if err := wal.logFile.Close(); err != nil {
 			t.Error(err)
 		}
 
-		// Reset dependencies and set limit to a high value that can never be
-		// reached to make sure we can recover after enough tries
-		deps.reset()
-		deps.writeLimit = math.MaxUint64
+		// Repeatedly try to recover WAL.
+		err = retry(25, time.Millisecond, func() error {
+			deps.reset()
 
-		// Repeatedly try to recover WAL
-		err = retry(numRetries, time.Millisecond, func() error {
+			// Collect some statistics about how often the reset suceeds.
 			counters[cntr]++
-			// Reset failed and try again
-			deps.mu.Lock()
-			deps.failed = false
-			deps.mu.Unlock()
 
 			// Try to recover WAL
-			return recoverSiloWAL(walPath, &deps, silos, testdir, file, numSilos, numIncrease)
+			err := recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
+			return err
 		})
 		if err != nil {
 			t.Fatalf("WAL never recovered: %v", err)

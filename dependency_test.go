@@ -41,8 +41,8 @@ type dependencyFaultyDisk struct {
 // newFaultyDiskDependency creates a dependency that can be used to simulate a
 // failing disk. writeLimit is the maximum number of writes the disk will
 // endure before failing
-func newFaultyDiskDependency(writeLimit uint64) dependencyFaultyDisk {
-	return dependencyFaultyDisk{
+func newFaultyDiskDependency(writeLimit uint64) *dependencyFaultyDisk {
+	return &dependencyFaultyDisk{
 		failDenominator: uint64(3),
 		writeLimit:      writeLimit,
 	}
@@ -63,13 +63,18 @@ func (d *dependencyFaultyDisk) create(path string) (file, error) {
 }
 
 // disabled allows the caller to temporarily disable the dependency
-func (d *dependencyFaultyDisk) disable(b bool) {
+func (d *dependencyFaultyDisk) disable() {
 	d.mu.Lock()
-	d.disabled = b
+	d.disabled = true
 	d.mu.Unlock()
 }
 func (*dependencyFaultyDisk) disrupt(s string) bool {
 	return s == "FaultyDisk"
+}
+func (d *dependencyFaultyDisk) enable() {
+	d.mu.Lock()
+	d.disabled = false
+	d.mu.Unlock()
 }
 
 // newFaultyFile creates a new faulty file around the provided file handle.
