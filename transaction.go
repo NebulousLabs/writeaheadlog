@@ -167,18 +167,13 @@ func (t *Transaction) commit() error {
 
 // marshalUpdates marshals the updates of a transaction
 func marshalUpdates(updates []Update) []byte {
-	// Declare helper function to find minimum
-	min := func(a, b int) int {
-		if a < b {
-			return a
-		}
-		return b
-	}
-
 	// preallocate buffer of appropriate size
 	var size int
 	for _, u := range updates {
-		size += 1 + min(len(u.Name), math.MaxUint8)
+		if len(u.Name) > math.MaxUint8 {
+			panic("The Update's name shouldn't exceed 255 characters")
+		}
+		size += 1 + len(u.Name)
 		size += 8 + len(u.Instructions)
 	}
 	buf := make([]byte, size)
@@ -186,10 +181,9 @@ func marshalUpdates(updates []Update) []byte {
 	var n int
 	for _, u := range updates {
 		// u.Name
-		nameLen := min(len(u.Name), math.MaxUint8)
-		buf[n] = byte(nameLen)
+		buf[n] = byte(len(u.Name))
 		n++
-		n += copy(buf[n:], u.Name[:nameLen])
+		n += copy(buf[n:], u.Name)
 		// u.Instructions
 		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Instructions)))
 		n += 8
