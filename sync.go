@@ -1,5 +1,9 @@
 package writeaheadlog
 
+import (
+	"time"
+)
+
 // threadedSync syncs the WAL in regular intervals
 func (w *WAL) threadedSync() {
 	for {
@@ -28,6 +32,9 @@ func (w *WAL) threadedSync() {
 
 		// Signal waiting threads that they can continue execution
 		w.syncCond.Broadcast()
+
+		// Wait a millisecond to allow for more syncs to queue up
+		<-time.After(time.Nanosecond)
 	}
 }
 
