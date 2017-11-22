@@ -3,7 +3,7 @@ package writeaheadlog
 const (
 	checksumSize = 16
 	pageSize     = 4096
-	pageMetaSize = 3 * 8 // 3 uint64s: txnStatus, nextPage offset, and payload size
+	pageMetaSize = 2 * 8 // 2 uint64s: nextPage offset, and payload size
 
 	// MaxPayloadSize is the number of bytes that can fit into a single
 	// page. For best performance, the number of pages written should be
@@ -25,10 +25,6 @@ const (
 const (
 	// txnStatusInvalid indicates an incorrectly initialized page.
 	txnStatusInvalid = iota
-
-	// txnStatusPage indicates a normal page, i.e. not the first page of a
-	// transaction.
-	txnStatusPage
 
 	// txnStatusWritten indicates that the transaction has been written, but
 	// not fully committed, meaning it should be ignored upon recovery.

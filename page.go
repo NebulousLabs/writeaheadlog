@@ -48,10 +48,9 @@ func (p *page) appendTo(buf []byte) []byte {
 	}
 
 	// write page contents
-	binary.LittleEndian.PutUint64(b[:], txnStatusPage)
-	binary.LittleEndian.PutUint64(b[8:], p.nextOffset())
-	binary.LittleEndian.PutUint64(b[16:], uint64(len(p.payload)))
-	copy(b[24:], p.payload)
+	binary.LittleEndian.PutUint64(b[0:], p.nextOffset())
+	binary.LittleEndian.PutUint64(b[8:], uint64(len(p.payload)))
+	copy(b[16:], p.payload)
 
 	return append(buf, b...)
 }
