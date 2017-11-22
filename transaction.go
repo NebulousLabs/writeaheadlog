@@ -3,7 +3,6 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
-	"log"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -196,7 +195,6 @@ func marshalUpdates(updates []Update) []byte {
 // prefixed data from a buffer and returns the data and a bool to indicate
 // success.
 func nextPrefix(prefixLen int, buf *bytes.Buffer) ([]byte, bool) {
-	log.Print(prefixLen)
 	if buf.Len() < prefixLen {
 		// missing length prefix
 		return nil, false
