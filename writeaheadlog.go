@@ -221,6 +221,7 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 
 	// reconstruct transactions
 	var txns []Transaction
+nextTxn:
 	for i := pageSize; i+firstPageMetaSize < len(data); i += pageSize {
 		status := binary.LittleEndian.Uint64(data[i:])
 		if status != txnStatusComitted {
@@ -247,7 +248,7 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 		for page := firstPage; page != nil; page = page.nextPage {
 			if _, exists := visited[page.offset]; exists {
 				// Loop detected
-				continue
+				continue nextTxn
 			}
 			visited[page.offset] = struct{}{}
 		}
