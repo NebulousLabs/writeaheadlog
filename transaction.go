@@ -3,6 +3,8 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -25,7 +27,8 @@ type Update struct {
 	// The name of the update type. When the WAL is loaded after an unclean
 	// shutdown, any un-committed changes will be passed as Updates back to the
 	// caller instantiating the WAL. The caller should determine what code to
-	// run on the the update based on the name and version.
+	// run on the the update based on the name and version. The length of the
+	// Name is capped to 255 bytes
 	Name string
 
 	// The marshalled data directing the update. The data is an opaque set of
@@ -101,6 +104,16 @@ var bufPool = sync.Pool{
 	},
 }
 
+// verify confirms if an update is valid. Otherwise it will panic
+func (u *Update) verify() {
+	if len(u.Name) == 0 {
+		panic("Name of transaction cannot be empty")
+	}
+	if len(u.Name) > math.MaxUint8 {
+		panic(fmt.Sprintf("Length of update.Name cannot exceed %v characters", math.MaxUint8))
+	}
+}
+
 // checksum calculates the checksum of a transaction excluding the checksum
 // field of each page
 func (t Transaction) checksum() (c checksum) {
@@ -167,7 +180,7 @@ func marshalUpdates(updates []Update) []byte {
 	// preallocate buffer of appropriate size
 	var size int
 	for _, u := range updates {
-		size += 8 + len(u.Name)
+		size += 1 + len(u.Name)
 		size += 8 + len(u.Instructions)
 	}
 	buf := make([]byte, size)
@@ -175,8 +188,8 @@ func marshalUpdates(updates []Update) []byte {
 	var n int
 	for _, u := range updates {
 		// u.Name
-		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Name)))
-		n += 8
+		buf[n] = byte(len(u.Name))
+		n++
 		n += copy(buf[n:], u.Name)
 		// u.Instructions
 		binary.LittleEndian.PutUint64(buf[n:], uint64(len(u.Instructions)))
@@ -186,22 +199,38 @@ func marshalUpdates(updates []Update) []byte {
 	return buf
 }
 
+// nextPrefix is a helper function that reads the next prefix of prefixLen and
+// prefixed data from a buffer and returns the data and a bool to indicate
+// success.
+func nextPrefix(prefixLen int, buf *bytes.Buffer) ([]byte, bool) {
+	if buf.Len() < prefixLen {
+		// missing length prefix
+		return nil, false
+	}
+	var l int
+	switch prefixLen {
+	case 8:
+		l = int(binary.LittleEndian.Uint64(buf.Next(prefixLen)))
+	case 4:
+		l = int(binary.LittleEndian.Uint32(buf.Next(prefixLen)))
+	case 2:
+		l = int(binary.LittleEndian.Uint16(buf.Next(prefixLen)))
+	case 1:
+		l = int(buf.Next(prefixLen)[0])
+	default:
+		return nil, false
+	}
+	if l < 0 || l > buf.Len() {
+		// invalid length prefix
+		return nil, false
+	}
+	return buf.Next(l), true
+}
+
 // unmarshalUpdates unmarshals the updates of a transaction
 func unmarshalUpdates(data []byte) ([]Update, error) {
 	// helper function for reading length-prefixed data
 	buf := bytes.NewBuffer(data)
-	nextPrefix := func(buf *bytes.Buffer) ([]byte, bool) {
-		if buf.Len() < 8 {
-			// missing length prefix
-			return nil, false
-		}
-		l := int(binary.LittleEndian.Uint64(buf.Next(8)))
-		if l < 0 || l > buf.Len() {
-			// invalid length prefix
-			return nil, false
-		}
-		return buf.Next(l), true
-	}
 
 	var updates []Update
 	for {
@@ -209,12 +238,12 @@ func unmarshalUpdates(data []byte) ([]Update, error) {
 			break
 		}
 
-		name, ok := nextPrefix(buf)
+		name, ok := nextPrefix(1, buf)
 		if !ok {
 			return nil, errors.New("failed to unmarshal name")
 		}
 
-		instructions, ok := nextPrefix(buf)
+		instructions, ok := nextPrefix(8, buf)
 		if !ok {
 			return nil, errors.New("failed to unmarshal instructions")
 		}
@@ -407,6 +436,10 @@ func (t *Transaction) append(updates []Update) (err error) {
 
 // Append appends additional updates to a transaction
 func (t *Transaction) Append(updates []Update) <-chan error {
+	// Verify the updates
+	for _, u := range updates {
+		u.verify()
+	}
 	done := make(chan error, 1)
 
 	if t.setupComplete || t.commitComplete || t.releaseComplete {
@@ -463,6 +496,10 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	// Check that there are updates for the transaction to process.
 	if len(updates) == 0 {
 		return nil, errors.New("cannot create a transaction without updates")
+	}
+	// Verify the updates
+	for _, u := range updates {
+		u.verify()
 	}
 
 	// Create new transaction
