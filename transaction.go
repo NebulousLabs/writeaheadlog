@@ -3,6 +3,7 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -103,6 +104,16 @@ var bufPool = sync.Pool{
 	},
 }
 
+// verify confirms if an update is valid. Otherwise it will panic
+func (u *Update) verify() {
+	if len(u.Name) == 0 {
+		panic("Name of transaction cannot be empty")
+	}
+	if len(u.Name) > math.MaxUint8 {
+		panic(fmt.Sprintf("Length of update.Name cannot exceed %v characters", math.MaxUint8))
+	}
+}
+
 // checksum calculates the checksum of a transaction excluding the checksum
 // field of each page
 func (t Transaction) checksum() (c checksum) {
@@ -169,9 +180,6 @@ func marshalUpdates(updates []Update) []byte {
 	// preallocate buffer of appropriate size
 	var size int
 	for _, u := range updates {
-		if len(u.Name) > math.MaxUint8 {
-			panic("The Update's name shouldn't exceed 255 characters")
-		}
 		size += 1 + len(u.Name)
 		size += 8 + len(u.Instructions)
 	}
@@ -428,6 +436,10 @@ func (t *Transaction) append(updates []Update) (err error) {
 
 // Append appends additional updates to a transaction
 func (t *Transaction) Append(updates []Update) <-chan error {
+	// Verify the updates
+	for _, u := range updates {
+		u.verify()
+	}
 	done := make(chan error, 1)
 
 	if t.setupComplete || t.commitComplete || t.releaseComplete {
@@ -484,6 +496,10 @@ func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
 	// Check that there are updates for the transaction to process.
 	if len(updates) == 0 {
 		return nil, errors.New("cannot create a transaction without updates")
+	}
+	// Verify the updates
+	for _, u := range updates {
+		u.verify()
 	}
 
 	// Create new transaction
