@@ -3,7 +3,6 @@ package writeaheadlog
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -107,10 +106,10 @@ var bufPool = sync.Pool{
 // verify confirms if an update is valid. Otherwise it will panic
 func (u *Update) verify() {
 	if len(u.Name) == 0 {
-		panic("Name of transaction cannot be empty")
+		panic("Name of Update cannot be empty")
 	}
 	if len(u.Name) > math.MaxUint8 {
-		panic(fmt.Sprintf("Length of update.Name cannot exceed %v characters", math.MaxUint8))
+		panic("Name of Update cannot be longer than 255 bytes")
 	}
 }
 
