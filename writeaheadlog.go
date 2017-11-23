@@ -182,7 +182,10 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 			return nil, errors.Extend(err, errors.New("unable to write WAL recovery state"))
 		}
 		w.recoveryComplete = true
-		return nil, errors.Extend(w.logFile.Sync(), errors.New("unable to sync after writing recovery state"))
+		if err := w.logFile.Sync(); err != nil {
+			return nil, errors.Extend(err, errors.New("unable to sync after writing recovery state"))
+		}
+		return nil, nil
 	}
 
 	// load all normal pages

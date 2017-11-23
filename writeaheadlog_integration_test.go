@@ -371,10 +371,6 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 // newSiloDatabase will create a silo database that overwrites any existing
 // silo database.
 func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, numSilos int64, numIncrease int) (map[int64]*silo, *WAL, file, error) {
-	// Disable the dependencies during the reset.
-	deps.disable()
-	defer deps.enable()
-
 	// Create new fake database file
 	file, err := deps.create(dbPath)
 	if err != nil {
@@ -410,20 +406,17 @@ func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, numSilo
 // the WAL in a single testcase. It uses 100 silos updating 1000 times each.
 func TestSilo(t *testing.T) {
 	// Declare some vars to configure the loop
-	numSilos := int64(250)
+	numSilos := int64(100)
 	numIncrease := 20
-	maxCntr := 50
-	counters := make([]int, maxCntr, maxCntr)
+	maxIters := 50
 	endTime := time.Now().Add(5 * time.Minute)
-	iters := 0
-	maxTries := 0
 	// Test should only run 10 seconds in short mode.
 	if testing.Short() {
-		endTime = time.Now().Add(10 * time.Second)
+		endTime = time.Now().Add(30 * time.Second)
 	}
 
 	// Create the folder and establis hthe filepaths.
-	deps := newFaultyDiskDependency(100e3)
+	deps := newFaultyDiskDependency(10e6)
 	testdir := tempDir("wal", t.Name())
 	os.MkdirAll(testdir, 0777)
 	dbPath := filepath.Join(testdir, "database.dat")
@@ -436,8 +429,10 @@ func TestSilo(t *testing.T) {
 	}
 
 	// Write silos, pull the plug and verify repeatedly
-	for cntr := 0; cntr < maxCntr; cntr++ {
-		println("JUMP")
+	i := 0
+	maxRetries := 0
+	totalRetries := 0
+	for i = 0; i < maxIters; i++ {
 		if time.Now().After(endTime) {
 			// Stop if test takes too long
 			break
@@ -445,14 +440,24 @@ func TestSilo(t *testing.T) {
 		// Reset the dependencies.
 		deps.reset()
 
-		// Nondeterministically call a function to completely reset the
-		// database + silos.
+		// Randomly decide between resetting the database entirely and opening
+		// the database from the previous iteration.
+		deps.disable()
 		if fastrand.Intn(3) == 0 {
+			// Reset database.
 			silos, wal, file, err = newSiloDatabase(deps, dbPath, walPath, numSilos, numIncrease)
 			if err != nil {
 				t.Fatal(err)
 			}
+		} else {
+			// Resume with existing database.
+			var updates []Update
+			updates, wal, err = newWal(walPath, deps)
+			if len(updates) > 0 || err != nil {
+				t.Fatal(updates, err)
+			}
 		}
+		deps.enable()
 
 		// Spin up all of the silo threads.
 		var wg sync.WaitGroup
@@ -464,34 +469,35 @@ func TestSilo(t *testing.T) {
 		wg.Wait()
 		// Close wal.
 		if err := wal.logFile.Close(); err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 
 		// Repeatedly try to recover WAL.
-		err = retry(25, time.Millisecond, func() error {
+		retries := 0
+		err = retry(100, time.Millisecond, func() error {
+			retries++
 			deps.reset()
-
-			// Collect some statistics about how often the reset suceeds.
-			counters[cntr]++
+			if retries >= 100 {
+				// Could be getting unlucky - try to disable the faulty disk and
+				// see if we can recover all the way.
+				t.Log("Disabling dependencies during recovery - recovery filed 100 times in a row")
+				deps.disable()
+				defer deps.enable()
+			}
 
 			// Try to recover WAL
-			err := recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
-			return err
+			return recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
 		})
 		if err != nil {
 			t.Fatalf("WAL never recovered: %v", err)
 		}
 
-		// Increment iterations
-		iters++
+		// Statistics
+		totalRetries += retries - 1
+		if retries > maxRetries {
+			maxRetries = retries - 1
+		}
 	}
-
-	// Log some statistics
-	avgCounter := 0
-	for _, n := range counters {
-		avgCounter += n
-	}
-	avgCounter /= len(counters)
 
 	walFile, err := os.Open(walPath)
 	if err != nil {
@@ -502,8 +508,8 @@ func TestSilo(t *testing.T) {
 		t.Errorf("Failed to get wal fileinfo: %v", err)
 	}
 
-	t.Logf("Number of iterations: %v", iters)
-	t.Logf("Max number of retries: %v", maxTries)
-	t.Logf("Average number of retries: %v", avgCounter)
+	t.Logf("Number of iterations: %v", i)
+	t.Logf("Max number of retries: %v", maxRetries)
+	t.Logf("Average number of retries: %v", totalRetries/i)
 	t.Logf("WAL size: %v bytes", fi.Size())
 }
