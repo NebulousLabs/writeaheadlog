@@ -34,7 +34,7 @@ func (w *WAL) threadedSync() {
 		w.syncCond.Broadcast()
 
 		// Wait a millisecond to allow for more syncs to queue up
-		<-time.After(time.Nanosecond)
+		time.Sleep(time.Nanosecond)
 	}
 }
 
