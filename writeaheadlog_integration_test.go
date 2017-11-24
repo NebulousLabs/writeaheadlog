@@ -335,6 +335,17 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 		}
 	}
 
+	// toUint32Slice is a helper function to convert a byte slice to a uint32
+	// slice
+	toUint32Slice := func(d []byte) []uint32 {
+		buf := bytes.NewBuffer(d)
+		converted := make([]uint32, len(d)/4, len(d)/4)
+		for i := 0; i < len(converted); i++ {
+			converted[i] = binary.LittleEndian.Uint32(buf.Next(4))
+		}
+		return converted
+	}
+
 	// Check if the checksums match the data
 	numbers := make([]byte, numSilos*int64(numIncrease)*4)
 	var cs checksum
@@ -355,6 +366,9 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 		if bytes.Compare(c[:checksumSize], cs[:]) != 0 {
 			return errors.New("Checksums don't match")
 		}
+
+		// Reset silo numbers in memory
+		silo.numbers = toUint32Slice(numbers)
 	}
 
 	if err := wal.RecoveryComplete(); err != nil {
@@ -422,11 +436,14 @@ func TestSilo(t *testing.T) {
 	dbPath := filepath.Join(testdir, "database.dat")
 	walPath := filepath.Join(testdir, "wal.dat")
 
-	// Create the silo database.
+	// Create the silo database. Disable deps before doing that. Otherwise the
+	// test might fail right away
+	deps.disable()
 	silos, wal, file, err := newSiloDatabase(deps, dbPath, walPath, numSilos, numIncrease)
 	if err != nil {
 		t.Fatal(err)
 	}
+	deps.enable()
 
 	// Write silos, pull the plug and verify repeatedly
 	i := 0
