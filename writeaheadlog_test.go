@@ -942,7 +942,7 @@ func benchmarkTransactionSpeed(b *testing.B, numThreads int, appendUpdate bool) 
 // BenchmarkTransactionSpeedAppend runs benchmarkTransactionSpeed with append =
 // false
 func BenchmarkTransactionSpeed(b *testing.B) {
-	numThreads := []int{1, 10, 100, 1000}
+	numThreads := []int{1, 10, 50, 100}
 	for _, n := range numThreads {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			benchmarkTransactionSpeed(b, n, false)
@@ -953,7 +953,7 @@ func BenchmarkTransactionSpeed(b *testing.B) {
 // BenchmarkTransactionSpeedAppend runs benchmarkTransactionSpeed with append =
 // true
 func BenchmarkTransactionSpeedAppend(b *testing.B) {
-	numThreads := []int{1, 10, 100, 1000}
+	numThreads := []int{1, 10, 50, 100}
 	for _, n := range numThreads {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			benchmarkTransactionSpeed(b, n, true)
