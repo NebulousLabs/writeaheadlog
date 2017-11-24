@@ -288,6 +288,17 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 	}
 }
 
+// toUint32Slice is a helper function to convert a byte slice to a uint32
+// slice
+func toUint32Slice(d []byte) []uint32 {
+	buf := bytes.NewBuffer(d)
+	converted := make([]uint32, len(d)/4, len(d)/4)
+	for i := 0; i < len(converted); i++ {
+		converted[i] = binary.LittleEndian.Uint32(buf.Next(4))
+	}
+	return converted
+}
+
 // recoverSiloWAL recovers the WAL after a crash. This will be called
 // repeatedly until it finishes.
 func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]*silo, testdir string, file file, numSilos int64, numIncrease int) (err error) {
@@ -333,17 +344,6 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 				return errors.Extend(errors.New("Failed to remove setup file"), err)
 			}
 		}
-	}
-
-	// toUint32Slice is a helper function to convert a byte slice to a uint32
-	// slice
-	toUint32Slice := func(d []byte) []uint32 {
-		buf := bytes.NewBuffer(d)
-		converted := make([]uint32, len(d)/4, len(d)/4)
-		for i := 0; i < len(converted); i++ {
-			converted[i] = binary.LittleEndian.Uint32(buf.Next(4))
-		}
-		return converted
 	}
 
 	// Check if the checksums match the data
