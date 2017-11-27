@@ -31,27 +31,28 @@ type dependencyFaultyDisk struct {
 	// failDenominator, and it starts at 2. This means that the more calls to
 	// WriteAt, the less likely the write is to fail. All calls will start
 	// automatically failing after writeLimit writes.
-	failDenominator uint64
-	writeLimit      uint64
-	failed          bool
 	disabled        bool
-	mu              sync.Mutex
+	failed          bool
+	failDenominator int
+	totalWrites     int
+	writeLimit      int
+
+	mu sync.Mutex
 }
 
 // newFaultyDiskDependency creates a dependency that can be used to simulate a
 // failing disk. writeLimit is the maximum number of writes the disk will
 // endure before failing
-func newFaultyDiskDependency(writeLimit uint64) dependencyFaultyDisk {
-	return dependencyFaultyDisk{
-		failDenominator: uint64(3),
-		writeLimit:      writeLimit,
+func newFaultyDiskDependency(writeLimit int) *dependencyFaultyDisk {
+	return &dependencyFaultyDisk{
+		writeLimit: writeLimit,
 	}
 }
 
 func (d *dependencyFaultyDisk) create(path string) (file, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.failed {
+	if d.tryFail() {
 		return nil, errors.New("failed to create file (faulty disk)")
 	}
 
@@ -63,13 +64,38 @@ func (d *dependencyFaultyDisk) create(path string) (file, error) {
 }
 
 // disabled allows the caller to temporarily disable the dependency
-func (d *dependencyFaultyDisk) disable(b bool) {
+func (d *dependencyFaultyDisk) disable() {
 	d.mu.Lock()
-	d.disabled = b
+	d.disabled = true
 	d.mu.Unlock()
 }
 func (*dependencyFaultyDisk) disrupt(s string) bool {
 	return s == "FaultyDisk"
+}
+func (d *dependencyFaultyDisk) enable() {
+	d.mu.Lock()
+	d.disabled = false
+	d.mu.Unlock()
+}
+
+// tryFail will check if the disk has failed yet, and if not, it'll rng to see
+// if the disk should fail now. Returns 'true' if the disk has failed.
+func (d *dependencyFaultyDisk) tryFail() bool {
+	d.totalWrites++
+	if d.disabled {
+		return false
+	}
+	if d.failed {
+		return true
+	}
+
+	d.failDenominator += fastrand.Intn(13)
+	fail := fastrand.Intn(int(d.failDenominator+1)) == 0 // +1 to prevent 0 from being passed in.
+	if fail || d.failDenominator >= d.writeLimit {
+		d.failed = true
+		return true
+	}
+	return false
 }
 
 // newFaultyFile creates a new faulty file around the provided file handle.
@@ -83,24 +109,16 @@ func (d *dependencyFaultyDisk) remove(path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.disabled {
-		return os.Remove(path)
-	}
-
-	fail := fastrand.Intn(int(d.failDenominator)) == 0
-	d.failDenominator++
-	if fail || d.failed || d.failDenominator >= d.writeLimit {
-		d.failed = true
+	if d.tryFail() {
 		return nil
 	}
-
 	return os.Remove(path)
 }
 
 // reset resets the failDenominator and the failed flag of the dependency
 func (d *dependencyFaultyDisk) reset() {
 	d.mu.Lock()
-	d.failDenominator = 3
+	d.failDenominator = 0
 	d.failed = false
 	d.mu.Unlock()
 }
@@ -124,19 +142,9 @@ func (f *faultyFile) Read(p []byte) (int, error) {
 func (f *faultyFile) Write(p []byte) (int, error) {
 	f.d.mu.Lock()
 	defer f.d.mu.Unlock()
-
-	if f.d.disabled {
-		return f.file.Write(p)
-	}
-
-	fail := fastrand.Intn(int(f.d.failDenominator)) == 0
-	f.d.failDenominator++
-	if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
-		f.d.failed = true
-		// scramble data
+	if f.d.tryFail() {
 		return f.file.Write(scrambleData(p))
 	}
-
 	return f.file.Write(p)
 }
 func (f *faultyFile) Close() error { return f.file.Close() }
@@ -149,16 +157,7 @@ func (f *faultyFile) ReadAt(p []byte, off int64) (int, error) {
 func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	f.d.mu.Lock()
 	defer f.d.mu.Unlock()
-
-	if f.d.disabled {
-		return f.file.WriteAt(p, off)
-	}
-
-	fail := fastrand.Intn(int(f.d.failDenominator)) == 0
-	f.d.failDenominator++
-	if fail || f.d.failed || f.d.failDenominator >= f.d.writeLimit {
-		f.d.failed = true
-		// scramble data
+	if f.d.tryFail() {
 		return f.file.WriteAt(scrambleData(p), off)
 	}
 	return f.file.WriteAt(p, off)
@@ -169,8 +168,7 @@ func (f *faultyFile) Stat() (os.FileInfo, error) {
 func (f *faultyFile) Sync() error {
 	f.d.mu.Lock()
 	defer f.d.mu.Unlock()
-
-	if !f.d.disabled && f.d.failed {
+	if f.d.tryFail() {
 		return errors.New("could not write to disk (faultyDisk)")
 	}
 	return f.file.Sync()

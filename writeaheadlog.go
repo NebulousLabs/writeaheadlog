@@ -99,14 +99,14 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 		// Reuse the existing wal
 		newWal.logFile, err = deps.openFile(path, os.O_RDWR, 0600)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, errors.Extend(errors.New("unable to open wal logFile"), err)
 		}
 
 		// Recover WAL and return updates
 		updates, err := newWal.recoverWAL(data)
 		if err != nil {
 			err = errors.Compose(err, newWal.logFile.Close())
-			return nil, nil, err
+			return nil, nil, errors.Extend(err, errors.New("unable to perform wal recovery"))
 		}
 		if len(updates) == 0 {
 			// if there are no updates to apply, set the recovery to complete
@@ -161,7 +161,7 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 	// Validate metadata
 	recoveryState, err := readWALMetadata(data[0:])
 	if err != nil {
-		return nil, err
+		return nil, errors.Extend(err, errors.New("unable to read wal metadata"))
 	}
 
 	if recoveryState == recoveryStateClean {
@@ -176,13 +176,16 @@ func (w *WAL) recoverWAL(data []byte) ([]Update, error) {
 	// wipe the wal and change the state
 	if recoveryState == recoveryStateWipe {
 		if err := w.wipeWAL(); err != nil {
-			return nil, err
+			return nil, errors.Extend(err, errors.New("unable to wipe wal"))
 		}
 		if err := w.writeRecoveryState(recoveryStateUnclean); err != nil {
 			return nil, errors.Extend(err, errors.New("unable to write WAL recovery state"))
 		}
 		w.recoveryComplete = true
-		return nil, w.logFile.Sync()
+		if err := w.logFile.Sync(); err != nil {
+			return nil, errors.Extend(err, errors.New("unable to sync after writing recovery state"))
+		}
+		return nil, nil
 	}
 
 	// load all normal pages
