@@ -1,61 +1,45 @@
 package writeaheadlog
 
 import (
-	"time"
+	"sync"
 )
 
 // threadedSync syncs the WAL in regular intervals
 func (w *WAL) threadedSync() {
 	for {
-		// Holding the lock of the condition is not required before calling
-		// Signal or Broadcast, but we also want to check the syncCount to
-		// avoid unnecessary syncs.
-		w.syncCond.L.Lock()
-		if w.syncCount == 0 {
-			// nothing to sync
-			w.syncing = false
-			w.syncCond.L.Unlock()
+		w.syncMu.Lock()
+		if w.syncStatus == 1 {
+			w.syncStatus = 0
+			w.syncMu.Unlock()
 			return
 		}
+		w.syncStatus = 1
+		syncErr := w.syncErr
+		w.syncErr = new(error)
+		blockLock := w.syncRWMu
+		w.syncRWMu = new(sync.RWMutex)
+		w.syncRWMu.Lock()
+		w.syncMu.Unlock()
 
-		// Reset syncCount
-		w.syncCount = 0
-
-		// Unlock the syncCond.L for other threads to queue up
-		w.syncCond.L.Unlock()
-
-		// Sync the file and set the error
-		err := w.logFile.Sync()
-		w.syncCond.L.Lock()
-		w.syncErr = err
-		w.syncCond.L.Unlock()
-
-		// Signal waiting threads that they can continue execution
-		w.syncCond.Broadcast()
-
-		// Wait a millisecond to allow for more syncs to queue up
-		time.Sleep(time.Nanosecond)
+		*syncErr = w.logFile.Sync()
+		blockLock.Unlock()
 	}
 }
 
 // fSync syncs the WAL's underlying file.
 func (w *WAL) fSync() error {
-	// We need to hold the lock of the condition before using it
-	w.syncCond.L.Lock()
-	defer w.syncCond.L.Unlock()
-
-	// Increment the number of syncing threads
-	w.syncCount++
-
-	// If we are the only syncing thread, spawn the threadedSync loop
-	if !w.syncing {
-		w.syncing = true
+	// Add oursevles to the sync queue.
+	w.syncMu.Lock()
+	if w.syncStatus == 0 {
+		// No syncing thread active, create one.
 		go w.threadedSync()
 	}
+	w.syncStatus = 2 // Indicate that there is a thread in the queue.
+	blockLock := w.syncRWMu
+	syncErr := w.syncErr
+	w.syncMu.Unlock()
 
-	// Wait for threadedSync to call Sync
-	w.syncCond.Wait()
-
-	// Return the Sync error
-	return w.syncErr
+	// Block until the sync lock is released.
+	blockLock.RLock()
+	return *syncErr
 }

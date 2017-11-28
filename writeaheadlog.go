@@ -38,38 +38,23 @@ type WAL struct {
 	// and the availablePages array is updated to include the extended pages.
 	filePageCount int
 
-	// logFile contains all of the persistent data associated with the log.
-	logFile file
-
-	// path is the path to the underlying logFile
-	path string
-
-	// mu is used to lock the availablePages field of the wal
-	mu sync.Mutex
-
-	// syncCond is used to schedule the calls to fsync
-	syncCond *sync.Cond
-
-	// syncCount is a counter that indicates how many transactions are
-	// currently waiting for a fsync
-	syncCount uint64
-
-	// stopChan is a channel that is used to signal a shutdown
-	stopChan chan struct{}
-
-	// syncing indicates if the syncing thread is currently being executed
-	syncing bool
-
-	// syncErr is the error returned by the most recent fsync call
-	syncErr error
-
 	// recoveryComplete indicates if the caller signalled that the recovery is complete
 	recoveryComplete bool
+
+	// Variables to coordinate batched syncs.
+	syncErr    *error        // coordinates errors around consecutive fsyncs
+	syncMu     sync.Mutex    // protects sync variables
+	syncRWMu   *sync.RWMutex // coordinates blocking around consecutive fsyncs
+	syncStatus int           // 0 means no syncing thread, 1 means syncing thread + empty queue, 2 means syncing thread with queue.
 
 	// dependencies are used to inject special behaviour into the wal by providing
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
-	deps dependencies
+	deps     dependencies
+	logFile  file
+	mu       sync.Mutex
+	path     string        // path of the underlying logFile
+	stopChan chan struct{} // signals shutdown
 }
 
 // allocatePages creates new pages and adds them to the available pages of the wal
@@ -88,9 +73,11 @@ func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	newWal := &WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),
-		syncCond: sync.NewCond(new(sync.Mutex)),
+		syncRWMu: new(sync.RWMutex),
+		syncErr:  new(error),
 		path:     path,
 	}
+	newWal.syncRWMu.Lock()
 
 	// Create a condition for the wal
 	// Try opening the WAL file.
