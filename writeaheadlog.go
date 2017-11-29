@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/NebulousLabs/errors"
 )
@@ -29,11 +30,8 @@ type WAL struct {
 	atomicUnfinishedTxns int64
 
 	// Variables to coordinate batched syncs. See sync.go for more information.
-	atomicSyncStatus uint32        // 0: no syncing thread, 1: syncing thread, empty queue, 2: syncing thread, non-empty queue.
-	syncErr          *error        // coordinates errors around consecutive fsyncs
-	syncMu           sync.Mutex    // protects sync variables
-	syncRWMu         *sync.RWMutex // coordinates blocking around consecutive fsyncs
-	syncStatus       int
+	atomicSyncStatus uint32         // 0: no syncing thread, 1: syncing thread, empty queue, 2: syncing thread, non-empty queue.
+	atomicSyncState  unsafe.Pointer // points to a struct containing a RWMutex and an error
 
 	// availablePages lists the offset of file pages which currently have completed or
 	// voided updates in them. The pages are in no particular order.
@@ -71,18 +69,16 @@ func (w *WAL) allocatePages(numPages int) {
 // newWal initializes and returns a wal.
 func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	// Create a new WAL.
-	//
-	// sync.go expects there to be both a syncErr and a syncRWMu, and it
-	// expects the syncRWMu to have a writelock. We must prepare that at
-	// startup.
 	newWal := &WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),
-		syncRWMu: new(sync.RWMutex),
-		syncErr:  new(error),
 		path:     path,
 	}
-	newWal.syncRWMu.Lock()
+	// sync.go expects the sync state to be initialized with a locked rwMu at
+	// startup.
+	ss := new(syncState)
+	ss.rwMu.Lock()
+	atomic.StorePointer(&newWal.atomicSyncState, unsafe.Pointer(ss))
 
 	// Create a condition for the wal
 	// Try opening the WAL file.
