@@ -129,12 +129,12 @@ func (su *siloUpdate) newUpdate() Update {
 }
 
 // newSiloUpdate creates a new Silo update for a number at a specific index
-func (s *silo) newSiloUpdate(index uint32, number uint32, ocs checksum) *siloUpdate {
+func (s *silo) newSiloUpdate(index uint32, number uint32, pcs checksum) *siloUpdate {
 	return &siloUpdate{
 		number:         number,
 		offset:         s.offset + int64(4*(index)),
 		silo:           s.offset,
-		prevChecksum:   ocs,
+		prevChecksum:   pcs,
 		checksumOffset: s.offset + int64(len(s.numbers)*4),
 	}
 }
@@ -298,6 +298,13 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 			return
 		}
 
+		// Reset random data and checksum if we used it
+		if newFile {
+			randomData = fastrand.Bytes(10 * pageSize)
+			s.cs = ncs
+			ncs = computeChecksum(randomData)
+		}
+
 		// Apply the updates
 		for _, su := range sus {
 			if err := su.applyUpdate(s, dataPath); err != nil {
@@ -315,14 +322,10 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 		if err := txn.SignalUpdatesApplied(); err != nil {
 			return
 		}
+
 		// Reset
 		sus = sus[:0]
 		updates = updates[:0]
-		if newFile {
-			randomData = fastrand.Bytes(10 * pageSize)
-			s.cs = ncs
-			ncs = computeChecksum(randomData)
-		}
 	}
 }
 
@@ -375,16 +378,12 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 	}()
 
 	// Unmarshal updates and apply them
-	var checksums = make(map[string]struct{})
 	for _, update := range updates {
 		var su siloUpdate
 		su.unmarshal(update.Instructions)
 		if err := su.applyUpdate(silos[su.silo], testdir); err != nil {
 			return errors.Extend(errors.New("Failed to apply update"), err)
 		}
-		// Remember new checksums to be able to remove unnecessary setup files
-		// later
-		checksums[hex.EncodeToString(su.newChecksum[:])] = struct{}{}
 	}
 
 	// Sync the applied updates
@@ -392,7 +391,7 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 		return errors.Extend(errors.New("Failed to sync database"), err)
 	}
 
-	// Check if the checksums match the data
+	// Check numbers and checksums
 	numbers := make([]byte, numSilos*int64(numIncrease)*4)
 	var cs checksum
 	for _, silo := range silos {
