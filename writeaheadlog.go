@@ -28,6 +28,13 @@ type WAL struct {
 	// released yet. This counter needs to be 0 for the wal to exit cleanly.
 	atomicUnfinishedTxns int64
 
+	// Variables to coordinate batched syncs. See sync.go for more information.
+	atomicSyncStatus uint32        // 0: no syncing thread, 1: syncing thread, empty queue, 2: syncing thread, non-empty queue.
+	syncErr          *error        // coordinates errors around consecutive fsyncs
+	syncMu           sync.Mutex    // protects sync variables
+	syncRWMu         *sync.RWMutex // coordinates blocking around consecutive fsyncs
+	syncStatus       int
+
 	// availablePages lists the offset of file pages which currently have completed or
 	// voided updates in them. The pages are in no particular order.
 	availablePages []uint64
@@ -40,12 +47,6 @@ type WAL struct {
 
 	// recoveryComplete indicates if the caller signalled that the recovery is complete
 	recoveryComplete bool
-
-	// Variables to coordinate batched syncs.
-	syncErr    *error        // coordinates errors around consecutive fsyncs
-	syncMu     sync.Mutex    // protects sync variables
-	syncRWMu   *sync.RWMutex // coordinates blocking around consecutive fsyncs
-	syncStatus int           // 0 means no syncing thread, 1 means syncing thread + empty queue, 2 means syncing thread with queue.
 
 	// dependencies are used to inject special behaviour into the wal by providing
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
@@ -69,7 +70,11 @@ func (w *WAL) allocatePages(numPages int) {
 
 // newWal initializes and returns a wal.
 func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
-	// Create a new WAL
+	// Create a new WAL.
+	//
+	// sync.go expects there to be both a syncErr and a syncRWMu, and it
+	// expects the syncRWMu to have a writelock. We must prepare that at
+	// startup.
 	newWal := &WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),

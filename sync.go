@@ -2,44 +2,66 @@ package writeaheadlog
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
-// threadedSync syncs the WAL in regular intervals
+// threadedSync syncs the WAL in regular intervals, returning if there is no
+// more work to do.
 func (w *WAL) threadedSync() {
 	for {
-		w.syncMu.Lock()
-		if w.syncStatus == 1 {
-			w.syncStatus = 0
-			w.syncMu.Unlock()
+		// Check if there is a syncing job. If there is no syncing job, the
+		// thread can return.
+		swapped := atomic.CompareAndSwapUint32(&w.atomicSyncStatus, 1, 0)
+		if swapped {
 			return
 		}
-		w.syncStatus = 1
+		// Indicate that all existing syncing jobs have been completed.
+		atomic.StoreUint32(&w.atomicSyncStatus, 1)
+
+		// Fetch the syncErr and syncMu for this upcoming sync call, and then
+		// replace them with a new syncErr and syncMu for the next sync call.
+		w.syncMu.Lock()
 		syncErr := w.syncErr
 		w.syncErr = new(error)
-		blockLock := w.syncRWMu
+		syncMu := w.syncRWMu
 		w.syncRWMu = new(sync.RWMutex)
 		w.syncRWMu.Lock()
 		w.syncMu.Unlock()
 
+		// Sync, and set the syncErr. Then unlock the syncMu, which will inform
+		// all waiting threads that the sync has completed.
 		*syncErr = w.logFile.Sync()
-		blockLock.Unlock()
+		syncMu.Unlock()
 	}
 }
 
-// fSync syncs the WAL's underlying file.
+// fSync will synchronize with the existing threadedSync thread to batch this
+// fsync. If no threadedSync thread exists, it will create one.
 func (w *WAL) fSync() error {
-	// Add oursevles to the sync queue.
+	// Fetch the lock for the next fsync, and the error for the next fsync.
+	// Need to fetch these values before indicating that there is a pending
+	// fsync, to guarantee that an fsync will run after fetching these vaules.
 	w.syncMu.Lock()
-	if w.syncStatus == 0 {
-		// No syncing thread active, create one.
-		go w.threadedSync()
-	}
-	w.syncStatus = 2 // Indicate that there is a thread in the queue.
-	blockLock := w.syncRWMu
+	syncMu := w.syncRWMu
 	syncErr := w.syncErr
 	w.syncMu.Unlock()
 
-	// Block until the sync lock is released.
-	blockLock.RLock()
+	// Set the sync status to '2' to indicate that there is at least one thread
+	// waiting for a sync. When we do this, we guarantee that an fsync is going
+	// to run following the update. It is possible, due to asynchrony, that the
+	// fsync has already completed and so we are running an unecessary fsync,
+	// but that is acceptable.
+	oldStatus := atomic.SwapUint32(&w.atomicSyncStatus, 2)
+	// If the status was previously '0', there is no syncing thread, and a new
+	// one must be spawned.
+	if oldStatus == 0 {
+		go w.threadedSync()
+	}
+
+	// The syncMu will hold a writelock until the fsync is completed. When we
+	// are able to grab a readlock, we know that the fsync has completed, and
+	// that the error has been written. We can safely read and return the
+	// error.
+	syncMu.RLock()
 	return *syncErr
 }
