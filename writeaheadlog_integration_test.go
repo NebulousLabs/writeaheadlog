@@ -219,7 +219,7 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 	// since there is a chance that nextNumber gets increased without updates
 	// being applied. This means that we miss a couple of numbers and we might
 	// end up with a slice like [1,2,3,0,0,0,1,2,3,4,5,0,0,0] which is
-	// corupted.
+	// corrupted.
 	s.nextNumber = 0
 
 	// This thread will execute until the dependency of the silo causes a file
