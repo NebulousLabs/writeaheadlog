@@ -357,6 +357,12 @@ func verifyNumbers(numbers []uint32) error {
 			dips++
 		}
 	}
+	// Check for the dip from the last number to the first number.
+	if len(numbers) > 1 {
+		if numbers[len(numbers)-1] < numbers[0] {
+			dips++
+		}
+	}
 	if dips > 1 {
 		return fmt.Errorf("numbers are corrupted %v", numbers)
 	}
