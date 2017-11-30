@@ -811,6 +811,130 @@ func TestTransactionAppend(t *testing.T) {
 	}
 }
 
+func TestXXX(b *testing.T) {
+	const numThreads = 10
+	const appendUpdate = false
+	b.Logf("Running benchmark with %v threads", numThreads)
+
+	wt, err := newWALTester(b.Name(), &dependencyMmap{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer wt.Close()
+
+	// Prepare a random update
+	updates := []Update{}
+	updates = append(updates, Update{
+		Name:         "test",
+		Instructions: fastrand.Bytes(4000), // 1 page / txn
+	})
+
+	// Define a function that creates a transaction from this update and
+	// applies it. It returns the duration it took to commit the transaction.
+	f := func() (latency time.Duration, err error) {
+		// Get start time
+		startTime := time.Now()
+		// Create txn
+		txn, err := wt.wal.NewTransaction(updates)
+		if err != nil {
+			return
+		}
+		// Append second update
+		if appendUpdate {
+			if err = <-txn.Append(updates); err != nil {
+				return
+			}
+		}
+		// Wait for the txn to be committed
+		if err = <-txn.SignalSetupComplete(); err != nil {
+			return
+		}
+		// Calculate latency after committing
+		latency = time.Since(startTime)
+		if err = txn.SignalUpdatesApplied(); err != nil {
+			return
+		}
+		return latency, nil
+	}
+
+	// Create a channel to stop threads
+	stop := make(chan struct{})
+
+	// Create atomic variables to count transactions and errors
+	var atomicNumTxns uint64
+	var atomicNumErr uint64
+
+	// Create waitgroup to wait for threads before reading the counters
+	var wg sync.WaitGroup
+
+	// Save latencies
+	latencies := make([]time.Duration, numThreads, numThreads)
+
+	// Start threads
+	for i := 0; i < numThreads; i++ {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			for {
+				// Check for stop signal
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// Execute the function
+				latency, err := f()
+				if err != nil {
+					// Abort thread on error
+					atomic.AddUint64(&atomicNumErr, 1)
+					return
+				}
+				atomic.AddUint64(&atomicNumTxns, 1)
+
+				// Remember highest latency
+				if latency > latencies[j] {
+					latencies[j] = latency
+				}
+			}
+		}(i)
+	}
+
+	// Kill threads after 1 minute
+	select {
+	case <-time.After(time.Minute):
+		close(stop)
+	}
+
+	// Wait for each thread to finish
+	wg.Wait()
+
+	// Check if any errors happened
+	if atomicNumErr > 0 {
+		b.Fatalf("%v errors happened during execution", atomicNumErr)
+	}
+
+	// Get the fileinfo
+	fi, err := os.Stat(wt.path)
+	if os.IsNotExist(err) {
+		b.Errorf("wal was deleted but shouldn't have")
+	}
+
+	// Find the maximum latency it took to commit a transaction
+	var maxLatency time.Duration
+	for i := 0; i < numThreads; i++ {
+		if latencies[i] > maxLatency {
+			maxLatency = latencies[i]
+		}
+	}
+
+	// Log results
+	b.Logf("filesize: %v mb", float64(fi.Size())/float64(1e+6))
+	b.Logf("used pages: %v", wt.wal.filePageCount)
+	b.Logf("total transactions: %v", atomicNumTxns)
+	b.Logf("txn/s: %v", float64(atomicNumTxns)/60.0)
+	b.Logf("maxLatency: %v", maxLatency)
+}
+
 // benchmarkTransactionSpeed is a helper function to create benchmarks that run
 // for 1 min to find out how many transactions can be applied to the wal and
 // how large the wal grows during that time using a certain number of threads.
@@ -819,7 +943,7 @@ func TestTransactionAppend(t *testing.T) {
 func benchmarkTransactionSpeed(b *testing.B, numThreads int, appendUpdate bool) {
 	b.Logf("Running benchmark with %v threads", numThreads)
 
-	wt, err := newWALTester(b.Name(), &dependencyProduction{})
+	wt, err := newWALTester(b.Name(), &dependencyMmap{})
 	if err != nil {
 		b.Error(err)
 	}

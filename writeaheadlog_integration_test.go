@@ -180,7 +180,7 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string, ncs checksum
 		done <- err
 		return
 	}
-	_, err = newFile.Write(fastrand.Bytes(10 * pageSize))
+	_, err = newFile.WriteAt(fastrand.Bytes(10*pageSize), 0)
 	if err != nil {
 		done <- err
 		return
@@ -419,6 +419,9 @@ func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, numSilo
 // TestSilo is an integration test that is supposed to test all the features of
 // the WAL in a single testcase. It uses 100 silos updating 1000 times each.
 func TestSilo(t *testing.T) {
+	if testing.Short() {
+		return
+	}
 	// Declare some vars to configure the loop
 	numSilos := int64(100)
 	numIncrease := 20

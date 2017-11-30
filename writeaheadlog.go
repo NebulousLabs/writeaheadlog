@@ -440,5 +440,5 @@ func (w *WAL) Close() error {
 // multiple appearances and them just being loaded a single time correctly.
 func New(path string) (u []Update, w *WAL, err error) {
 	// Create a wal with production dependencies
-	return newWal(path, &dependencyProduction{})
+	return newWal(path, &dependencyMmap{})
 }
