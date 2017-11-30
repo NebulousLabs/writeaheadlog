@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/NebulousLabs/errors"
 )
@@ -28,6 +29,10 @@ type WAL struct {
 	// released yet. This counter needs to be 0 for the wal to exit cleanly.
 	atomicUnfinishedTxns int64
 
+	// Variables to coordinate batched syncs. See sync.go for more information.
+	atomicSyncStatus uint32         // 0: no syncing thread, 1: syncing thread, empty queue, 2: syncing thread, non-empty queue.
+	atomicSyncState  unsafe.Pointer // points to a struct containing a RWMutex and an error
+
 	// availablePages lists the offset of file pages which currently have completed or
 	// voided updates in them. The pages are in no particular order.
 	availablePages []uint64
@@ -38,38 +43,17 @@ type WAL struct {
 	// and the availablePages array is updated to include the extended pages.
 	filePageCount int
 
-	// logFile contains all of the persistent data associated with the log.
-	logFile file
-
-	// path is the path to the underlying logFile
-	path string
-
-	// mu is used to lock the availablePages field of the wal
-	mu sync.Mutex
-
-	// syncCond is used to schedule the calls to fsync
-	syncCond *sync.Cond
-
-	// syncCount is a counter that indicates how many transactions are
-	// currently waiting for a fsync
-	syncCount uint64
-
-	// stopChan is a channel that is used to signal a shutdown
-	stopChan chan struct{}
-
-	// syncing indicates if the syncing thread is currently being executed
-	syncing bool
-
-	// syncErr is the error returned by the most recent fsync call
-	syncErr error
-
 	// recoveryComplete indicates if the caller signalled that the recovery is complete
 	recoveryComplete bool
 
 	// dependencies are used to inject special behaviour into the wal by providing
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
-	deps dependencies
+	deps     dependencies
+	logFile  file
+	mu       sync.Mutex
+	path     string        // path of the underlying logFile
+	stopChan chan struct{} // signals shutdown
 }
 
 // allocatePages creates new pages and adds them to the available pages of the wal
@@ -84,13 +68,17 @@ func (w *WAL) allocatePages(numPages int) {
 
 // newWal initializes and returns a wal.
 func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
-	// Create a new WAL
+	// Create a new WAL.
 	newWal := &WAL{
 		deps:     deps,
 		stopChan: make(chan struct{}),
-		syncCond: sync.NewCond(new(sync.Mutex)),
 		path:     path,
 	}
+	// sync.go expects the sync state to be initialized with a locked rwMu at
+	// startup.
+	ss := new(syncState)
+	ss.rwMu.Lock()
+	atomic.StorePointer(&newWal.atomicSyncState, unsafe.Pointer(ss))
 
 	// Create a condition for the wal
 	// Try opening the WAL file.

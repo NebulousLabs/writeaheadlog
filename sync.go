@@ -1,61 +1,75 @@
 package writeaheadlog
 
+// When the WAL is created, sync.go requires the syncState to exist, and have a
+// write-locked rwMu.
+
 import (
-	"time"
+	"sync"
+	"sync/atomic"
+	"unsafe"
 )
 
-// threadedSync syncs the WAL in regular intervals
+// syncState contains the RWMutex and the error that correspond to a single
+// fsync. The syncState is swapped out atomically each fsync cycle.
+type syncState struct {
+	err  error
+	rwMu sync.RWMutex
+}
+
+// threadedSync syncs the WAL in regular intervals, exiting if there is no more
+// work to do.
 func (w *WAL) threadedSync() {
 	for {
-		// Holding the lock of the condition is not required before calling
-		// Signal or Broadcast, but we also want to check the syncCount to
-		// avoid unnecessary syncs.
-		w.syncCond.L.Lock()
-		if w.syncCount == 0 {
-			// nothing to sync
-			w.syncing = false
-			w.syncCond.L.Unlock()
+		// Check if there is a syncing job. If there is no syncing job, the
+		// thread can return.
+		swapped := atomic.CompareAndSwapUint32(&w.atomicSyncStatus, 1, 0)
+		if swapped {
+			// A zero will only be swapped in if the value in place was '1',
+			// which indicates that no work has been added since the previous
+			// fsync. We can return safely, having indicated that there is no
+			// syncing thread running by swapping a '0' into the sync state.
 			return
 		}
+		// Indicate that all existing syncing jobs will be completed.
+		atomic.StoreUint32(&w.atomicSyncStatus, 1)
 
-		// Reset syncCount
-		w.syncCount = 0
+		// Create the syncState for the next iteration and then swap it for the
+		// syncState that covers this iteration.
+		newSS := new(syncState)
+		newSS.rwMu.Lock()
+		oldSS := (*syncState)(atomic.SwapPointer(&w.atomicSyncState, unsafe.Pointer(newSS)))
 
-		// Unlock the syncCond.L for other threads to queue up
-		w.syncCond.L.Unlock()
-
-		// Sync the file and set the error
-		err := w.logFile.Sync()
-		w.syncCond.L.Lock()
-		w.syncErr = err
-		w.syncCond.L.Unlock()
-
-		// Signal waiting threads that they can continue execution
-		w.syncCond.Broadcast()
-
-		// Wait a millisecond to allow for more syncs to queue up
-		time.Sleep(time.Nanosecond)
+		// Sync, and set the syncErr. Then unlock the rwMu, which will inform
+		// all waiting threads that the sync has completed.
+		oldSS.err = w.logFile.Sync()
+		oldSS.rwMu.Unlock()
 	}
 }
 
-// fSync syncs the WAL's underlying file.
+// fSync will synchronize with the existing threadedSync thread to batch this
+// fsync. If no threadedSync thread exists, it will create one.
 func (w *WAL) fSync() error {
-	// We need to hold the lock of the condition before using it
-	w.syncCond.L.Lock()
-	defer w.syncCond.L.Unlock()
+	// Fetch the lock for the next fsync, and the error for the next fsync.
+	// Need to fetch these values before indicating that there is a pending
+	// fsync, to guarantee that an fsync will run after fetching these vaules.
+	ss := (*syncState)(atomic.LoadPointer(&w.atomicSyncState))
 
-	// Increment the number of syncing threads
-	w.syncCount++
-
-	// If we are the only syncing thread, spawn the threadedSync loop
-	if !w.syncing {
-		w.syncing = true
+	// Set the sync status to '2' to indicate that there is at least one thread
+	// waiting for a sync. When we do this, we guarantee that an fsync is going
+	// to run following the update. It is possible, due to asynchrony, that the
+	// fsync has already completed and so we are running an unecessary fsync,
+	// but that is acceptable and should not impact performance.
+	oldStatus := atomic.SwapUint32(&w.atomicSyncStatus, 2)
+	// If the status was previously '0', there is no syncing thread, and a new
+	// one must be spawned.
+	if oldStatus == 0 {
 		go w.threadedSync()
 	}
 
-	// Wait for threadedSync to call Sync
-	w.syncCond.Wait()
-
-	// Return the Sync error
-	return w.syncErr
+	// The syncMu will hold a writelock until the fsync is completed. When we
+	// are able to grab a readlock, we know that the fsync has completed, and
+	// that the error has been written. We can safely read and return the
+	// error.
+	ss.rwMu.RLock()
+	return ss.err
 }
