@@ -473,7 +473,8 @@ func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, dataPat
 }
 
 // TestSilo is an integration test that is supposed to test all the features of
-// the WAL in a single testcase. It uses 100 silos updating 1000 times each.
+// the WAL in a single testcase. It uses 120 silos updating 250 times each and
+// has a time limit of 5 minutes (long) or 30 seconds (short).
 func TestSilo(t *testing.T) {
 	// Declare some vars to configure the loop
 	numSilos := int64(120)
