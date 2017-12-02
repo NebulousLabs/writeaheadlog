@@ -219,7 +219,7 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 	// since there is a chance that nextNumber gets increased without updates
 	// being applied. This means that we miss a couple of numbers and we might
 	// end up with a slice like [1,2,3,0,0,0,1,2,3,4,5,0,0,0] which is
-	// corupted.
+	// corrupted.
 	s.nextNumber = 0
 
 	// This thread will execute until the dependency of the silo causes a file
@@ -357,6 +357,10 @@ func verifyNumbers(numbers []uint32) error {
 			dips++
 		}
 	}
+	// Check for the dip from the last number to the first number.
+	if numbers[0] < numbers[len(numbers)-1] {
+		dips++
+	}
 	if dips > 1 {
 		return fmt.Errorf("numbers are corrupted %v", numbers)
 	}
@@ -469,7 +473,8 @@ func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, dataPat
 }
 
 // TestSilo is an integration test that is supposed to test all the features of
-// the WAL in a single testcase. It uses 100 silos updating 1000 times each.
+// the WAL in a single testcase. It uses 120 silos updating 250 times each and
+// has a time limit of 5 minutes (long) or 30 seconds (short).
 func TestSilo(t *testing.T) {
 	// Declare some vars to configure the loop
 	numSilos := int64(120)
