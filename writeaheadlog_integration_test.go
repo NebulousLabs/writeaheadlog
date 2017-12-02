@@ -367,7 +367,7 @@ func verifyNumbers(numbers []uint32) error {
 // repeatedly until it finishes.
 func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]*silo, testdir string, file file, numSilos int64, numIncrease int) (err error) {
 	// Reload wal.
-	updates, wal, err := newWal(walPath, deps)
+	recoveredTxns, wal, err := newWal(walPath, deps)
 	if err != nil {
 		return errors.Extend(errors.New("failed to reload WAL"), err)
 	}
@@ -378,11 +378,13 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 	}()
 
 	// Unmarshal updates and apply them
-	for _, update := range updates {
-		var su siloUpdate
-		su.unmarshal(update.Instructions)
-		if err := su.applyUpdate(silos[su.silo], testdir); err != nil {
-			return errors.Extend(errors.New("Failed to apply update"), err)
+	for _, txn := range recoveredTxns {
+		for _, update := range txn.Updates {
+			var su siloUpdate
+			su.unmarshal(update.Instructions)
+			if err := su.applyUpdate(silos[su.silo], testdir); err != nil {
+				return errors.Extend(errors.New("Failed to apply update"), err)
+			}
 		}
 	}
 
@@ -422,8 +424,10 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 		silo.numbers = parsedNumbers
 	}
 
-	if err := wal.RecoveryComplete(); err != nil {
-		return errors.Extend(errors.New("Failed to signal completed recovery"), err)
+	for _, txn := range recoveredTxns {
+		if err := txn.SignalUpdatesApplied(); err != nil {
+			return errors.Extend(errors.New("Failed to signal applied updates"), err)
+		}
 	}
 
 	// Close the wal
@@ -448,8 +452,8 @@ func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, dataPat
 	}
 	// Return an error if the wal responds in any way indicating that it's not
 	// a new wal.
-	if len(updates) > 0 || wal.recoveryComplete == false {
-		return nil, nil, nil, fmt.Errorf("len(updates) was %v and recoveryComplete was %v", len(updates), wal.recoveryComplete)
+	if len(updates) > 0 {
+		return nil, nil, nil, fmt.Errorf("len(updates) was %v", len(updates))
 	}
 
 	// Create and initialize the silos.
@@ -524,10 +528,10 @@ func TestSilo(t *testing.T) {
 			}
 		} else {
 			// Resume with existing database.
-			var updates []Update
-			updates, wal, err = newWal(walPath, deps)
-			if len(updates) > 0 || err != nil {
-				t.Fatal(updates, err)
+			var recoveredTxns []*Transaction
+			recoveredTxns, wal, err = newWal(walPath, deps)
+			if len(recoveredTxns) > 0 || err != nil {
+				t.Fatal(recoveredTxns, err)
 			}
 		}
 		deps.enable()
