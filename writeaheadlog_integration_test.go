@@ -173,6 +173,9 @@ func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 			return err
 		}
 	}
+
+	// Update the silos cs field
+	silo.cs = su.newChecksum
 	return nil
 }
 
@@ -301,7 +304,6 @@ func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.Wa
 		// Reset random data and checksum if we used it
 		if newFile {
 			randomData = fastrand.Bytes(10 * pageSize)
-			s.cs = ncs
 			ncs = computeChecksum(randomData)
 		}
 
