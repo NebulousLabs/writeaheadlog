@@ -46,14 +46,17 @@ type WAL struct {
 	// recoveryComplete indicates if the caller signalled that the recovery is complete
 	recoveryComplete bool
 
+	// wg is a WaitGroup that allows us to wait for the syncThread to finish to
+	// ensure a clean shutdown
+	wg sync.WaitGroup
+
 	// dependencies are used to inject special behaviour into the wal by providing
 	// custom dependencies when the wal is created and calling deps.disrupt(setting).
 	// The following settings are currently available
-	deps     dependencies
-	logFile  file
-	mu       sync.Mutex
-	path     string        // path of the underlying logFile
-	stopChan chan struct{} // signals shutdown
+	deps    dependencies
+	logFile file
+	mu      sync.Mutex
+	path    string // path of the underlying logFile
 }
 
 // allocatePages creates new pages and adds them to the available pages of the wal
@@ -70,9 +73,8 @@ func (w *WAL) allocatePages(numPages int) {
 func newWal(path string, deps dependencies) (u []Update, w *WAL, err error) {
 	// Create a new WAL.
 	newWal := &WAL{
-		deps:     deps,
-		stopChan: make(chan struct{}),
-		path:     path,
+		deps: deps,
+		path: path,
 	}
 	// sync.go expects the sync state to be initialized with a locked rwMu at
 	// startup.
@@ -409,11 +411,20 @@ func (w *WAL) Close() error {
 		err1 = w.writeRecoveryState(recoveryStateClean)
 	}
 
-	// Close the logFile and stopChan
+	// Make sure sync thread isn't running
+	w.wg.Wait()
+
+	// Close the logFile
 	err2 := w.logFile.Close()
-	close(w.stopChan)
 
 	return errors.Compose(err1, err2)
+}
+
+// CloseIncomplete closes the WAL and reports the number of transactions that
+// are still uncomitted.
+func (w *WAL) CloseIncomplete() (int64, error) {
+	w.wg.Wait()
+	return atomic.LoadInt64(&w.atomicUnfinishedTxns), w.logFile.Close()
 }
 
 // New will open a WAL. If the previous run did not shut down cleanly, a set of
