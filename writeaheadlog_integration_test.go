@@ -45,6 +45,7 @@ type (
 		deps   dependencies
 		f      file  // database file holding silo
 		offset int64 // offset within database
+		skip   bool  // skips the next startup and verification of the silo
 	}
 
 	// A siloUpdate contains an update to the silo. There is a number that
@@ -152,6 +153,11 @@ func (su siloUpdate) applyUpdate(silo *silo, dataPath string) error {
 		panic("silo shouldn't be nil")
 	}
 
+	// This update should be skipped this time
+	if silo.skip {
+		return nil
+	}
+
 	// Write number
 	data := make([]byte, 4)
 	binary.LittleEndian.PutUint32(data[:], su.number)
@@ -209,6 +215,11 @@ func (s *silo) threadedSetupWrite(done chan error, dataPath string, randomData [
 // threadedUpdate updates a silo until a sync fails
 func (s *silo) threadedUpdate(t *testing.T, w *WAL, dataPath string, wg *sync.WaitGroup) {
 	defer wg.Done()
+
+	// This silo has unfinished transactions. Skip it.
+	if s.skip {
+		return
+	}
 
 	// Allocate some memory for the updates
 	sus := make([]*siloUpdate, 0, len(s.numbers))
@@ -367,11 +378,11 @@ func verifyNumbers(numbers []uint32) error {
 
 // recoverSiloWAL recovers the WAL after a crash. This will be called
 // repeatedly until it finishes.
-func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]*silo, testdir string, file file, numSilos int64, numIncrease int) (err error) {
+func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]*silo, testdir string, file file, numSilos int64, numIncrease int) (numSkipped int, err error) {
 	// Reload wal.
 	recoveredTxns, wal, err := newWal(walPath, deps)
 	if err != nil {
-		return errors.Extend(errors.New("failed to reload WAL"), err)
+		return 0, errors.Extend(errors.New("failed to reload WAL"), err)
 	}
 	defer func() {
 		if err != nil {
@@ -380,82 +391,97 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 	}()
 
 	// Unmarshal updates and apply them
+	var appliedTxns []*Transaction
 	for _, txn := range recoveredTxns {
+		// 10% chance to skip transaction
+		skipTxn := fastrand.Intn(10) == 0
 		for _, update := range txn.Updates {
 			var su siloUpdate
 			su.unmarshal(update.Instructions)
+			silos[su.silo].skip = skipTxn
 			if err := su.applyUpdate(silos[su.silo], testdir); err != nil {
-				return errors.Extend(errors.New("Failed to apply update"), err)
+				return 0, errors.Extend(errors.New("Failed to apply update"), err)
 			}
+		}
+		if !skipTxn {
+			appliedTxns = append(appliedTxns, txn)
 		}
 	}
 
 	// Sync the applied updates
 	if err := file.Sync(); err != nil {
-		return errors.Extend(errors.New("Failed to sync database"), err)
+		return 0, errors.Extend(errors.New("Failed to sync database"), err)
 	}
 
 	// Check numbers and checksums
 	numbers := make([]byte, numSilos*int64(numIncrease)*4)
 	var cs checksum
 	for _, silo := range silos {
+		// We didn't apply the changes for this silo. Skip it this time.
+		if silo.skip {
+			continue
+		}
 		// Adjust the size of numbers
 		numbers = numbers[:4*len(silo.numbers)]
 
 		// Read numbers and checksum
 		if _, err := silo.f.ReadAt(numbers, silo.offset); err != nil {
-			return errors.Extend(errors.New("Failed to read numbers of silo"), err)
+			return 0, errors.Extend(errors.New("Failed to read numbers of silo"), err)
 		}
 		if _, err := silo.f.ReadAt(cs[:], silo.offset+int64(4*len(silo.numbers))); err != nil {
-			return errors.Extend(errors.New("Failed to read checksum of silo"), err)
+			return 0, errors.Extend(errors.New("Failed to read checksum of silo"), err)
 		}
 
 		// Check numbers for corruption
 		parsedNumbers := toUint32Slice(numbers)
 		if err := verifyNumbers(parsedNumbers); err != nil {
-			return err
+			return 0, err
 		}
 
 		// Check if a file for the checksum exists
 		csHex := hex.EncodeToString(cs[:])
 		if _, err := os.Stat(filepath.Join(testdir, csHex)); os.IsNotExist(err) {
-			return fmt.Errorf("No file for the following checksum exists: %v", csHex)
+			return 0, fmt.Errorf("No file for the following checksum exists: %v", csHex)
 		}
 
 		// Reset silo numbers in memory
 		silo.numbers = parsedNumbers
 	}
 
-	for _, txn := range recoveredTxns {
+	for _, txn := range appliedTxns {
 		if err := txn.SignalUpdatesApplied(); err != nil {
-			return errors.Extend(errors.New("Failed to signal applied updates"), err)
+			return 0, errors.Extend(errors.New("Failed to signal applied updates"), err)
 		}
 	}
 
 	// Close the wal
 	if err := wal.Close(); err != nil {
-		return errors.Extend(errors.New("Failed to close WAL"), err)
+		return 0, errors.Extend(errors.New("Failed to close WAL"), err)
 	}
-	return nil
+	return len(recoveredTxns) - len(appliedTxns), nil
 }
 
 // newSiloDatabase will create a silo database that overwrites any existing
 // silo database.
-func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, dataPath string, numSilos int64, numIncrease int) (map[int64]*silo, *WAL, file, error) {
+func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, dataPath string, numSilos int64, numIncrease int, numSkipped int) (map[int64]*silo, *WAL, file, error) {
 	// Create the database file.
 	file, err := deps.create(dbPath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	// Create the wal.
-	updates, wal, err := newWal(walPath, deps)
+	recoveredTxns, wal, err := newWal(walPath, deps)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// Return an error if the wal responds in any way indicating that it's not
-	// a new wal.
-	if len(updates) > 0 {
-		return nil, nil, nil, fmt.Errorf("len(updates) was %v", len(updates))
+	// The wal might contain skipped transactions. Apply them.
+	if len(recoveredTxns) != numSkipped {
+		return nil, nil, nil, fmt.Errorf("Expected %v txns but was %v", numSkipped, len(recoveredTxns))
+	}
+	for _, txn := range recoveredTxns {
+		if err := txn.SignalUpdatesApplied(); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 
 	// Create and initialize the silos.
@@ -497,7 +523,7 @@ func TestSilo(t *testing.T) {
 	// Create the silo database. Disable deps before doing that. Otherwise the
 	// test might fail right away
 	deps.disable()
-	silos, wal, file, err := newSiloDatabase(deps, dbPath, walPath, testdir, numSilos, numIncrease)
+	silos, wal, file, err := newSiloDatabase(deps, dbPath, walPath, testdir, numSilos, numIncrease, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,6 +534,7 @@ func TestSilo(t *testing.T) {
 	i := 0
 	maxRetries := 0
 	totalRetries := 0
+	numSkipped := 0
 	for i = 0; i < maxIters; i++ {
 		if time.Now().After(endTime) {
 			// Stop if test takes too long
@@ -524,7 +551,7 @@ func TestSilo(t *testing.T) {
 		deps.disable()
 		if fastrand.Intn(3) == 0 {
 			// Reset database.
-			silos, wal, file, err = newSiloDatabase(deps, dbPath, walPath, testdir, numSilos, numIncrease)
+			silos, wal, file, err = newSiloDatabase(deps, dbPath, walPath, testdir, numSilos, numIncrease, numSkipped)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -532,7 +559,7 @@ func TestSilo(t *testing.T) {
 			// Resume with existing database.
 			var recoveredTxns []*Transaction
 			recoveredTxns, wal, err = newWal(walPath, deps)
-			if len(recoveredTxns) > 0 || err != nil {
+			if len(recoveredTxns) != numSkipped || err != nil {
 				t.Fatal(recoveredTxns, err)
 			}
 		}
@@ -567,7 +594,9 @@ func TestSilo(t *testing.T) {
 			}
 
 			// Try to recover WAL
-			return recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
+			var err error
+			numSkipped, err = recoverSiloWAL(walPath, deps, silos, testdir, file, numSilos, numIncrease)
+			return err
 		})
 		if err != nil {
 			t.Fatalf("WAL never recovered: %v", err)
