@@ -535,6 +535,7 @@ func TestSilo(t *testing.T) {
 	maxRetries := 0
 	totalRetries := 0
 	numSkipped := 0
+	totalSkipped := 0
 	for i = 0; i < maxIters; i++ {
 		if time.Now().After(endTime) {
 			// Stop if test takes too long
@@ -607,6 +608,9 @@ func TestSilo(t *testing.T) {
 		if retries > maxRetries {
 			maxRetries = retries - 1
 		}
+
+		// Statistics about how many transactions are skipped.
+		totalSkipped += numSkipped
 	}
 
 	// Fetch the size of the wal file for the stats reporting.
@@ -623,5 +627,6 @@ func TestSilo(t *testing.T) {
 	t.Logf("Number of iterations: %v", i)
 	t.Logf("Max number of retries: %v", maxRetries)
 	t.Logf("Average number of retries: %v", totalRetries/i)
+	t.Logf("Average number of skipped txns: %v", totalSkipped/i)
 	t.Logf("WAL size: %v bytes", fi.Size())
 }
