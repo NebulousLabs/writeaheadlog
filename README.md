@@ -11,12 +11,11 @@ to the caller to guarantee that the instructions are idempotent and consistent.
 
 First the wal needs to be opened by calling `New(string path)`. This will
 create a new WAL at the provided path or load an existing one. The latter will
-recover the WAL and return all the updates of transactions that were not
-completed.
+recover the WAL and return all the transactions that were not completed.
 
 ```
 // Open the WAL.
-updates, wal, err := New(walPath)
+recoveredTxns, wal, err := New(walPath)
 if err != nil {
 	return err
 }
@@ -24,13 +23,16 @@ if err != nil {
 if len(updates) != 0 {
 	// Apparently the system crashed. Handle the unfinished updates
 	// accordingly.
-	applyUpdates(updates)
+	applyUpdates(recoveredTxns)
 
-	// After the recovery is complete we need to signal the WAL that we are
-	// done. All calls to 'NewTransaction' will return an error until
-	// RecoveryComplete() has been called.
-	if err := wal.RecoveryComplete(); err != nil {
-		return err
+	// After the recovery is complete we can signal the WAL that we are
+	// done and that the updates were applied.
+	// NOTE: This is optional. If for some reason an update cannot be
+	// applied right away it may be skipped and applied later
+	for _, txn := range recoveredTxns {
+		if err := txn.SignalUpdatesApplied; err != nil {
+			return err
+		}
 	}
 }
 ```

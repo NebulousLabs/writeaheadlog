@@ -41,8 +41,8 @@ func tempDir(dirs ...string) string {
 type walTester struct {
 	wal *WAL
 
-	updates []Update
-	path    string
+	recoveredTxns []*Transaction
+	path          string
 }
 
 // Close is a helper function for a clean tester shutdown
@@ -61,20 +61,22 @@ func newWALTester(name string, deps dependencies) (*walTester, error) {
 	}
 
 	path := filepath.Join(testdir, "test.wal")
-	updates, wal, err := newWal(path, deps)
+	recoveredTxns, wal, err := newWal(path, deps)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := wal.RecoveryComplete(); err != nil {
-		wal.Close()
-		return nil, err
+	for _, txn := range recoveredTxns {
+		if err := txn.SignalUpdatesApplied(); err != nil {
+			wal.Close()
+			return nil, err
+		}
 	}
 
 	cmt := &walTester{
-		wal:     wal,
-		updates: updates,
-		path:    path,
+		wal:           wal,
+		recoveredTxns: recoveredTxns,
+		path:          path,
 	}
 	return cmt, nil
 }
@@ -470,7 +472,7 @@ func TestWalParallel(t *testing.T) {
 	}
 
 	// The number of available pages should equal the number of created pages
-	if wt.wal.filePageCount != len(wt.wal.availablePages) {
+	if wt.wal.filePageCount != uint64(len(wt.wal.availablePages)) {
 		t.Errorf("number of available pages doesn't match the number of created ones. Expected %v, but was %v",
 			wt.wal.availablePages, wt.wal.filePageCount)
 	}
@@ -542,7 +544,7 @@ func TestPageRecycling(t *testing.T) {
 		t.Errorf("The number of used pages should be greater than 0")
 	}
 	// Make sure usedPages equals availablePages and remember the values
-	if usedPages != availablePages {
+	if usedPages != uint64(availablePages) {
 		t.Errorf("number of used pages doesn't match number of available pages")
 	}
 
@@ -714,33 +716,39 @@ func TestRecoveryFailed(t *testing.T) {
 		t.Error("There should have been an error but there wasn't")
 	}
 
-	updates2, w, err := newWal(wt.path, &dependencyRecoveryFail{})
+	recoveredTxns2, w, err := newWal(wt.path, &dependencyRecoveryFail{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// New should return numUpdates updates
-	if len(updates2) != numUpdates {
-		t.Errorf("There should be %v updates but there were %v", numUpdates, len(updates2))
+	numRecoveredUpdates := 0
+	for _, txn := range recoveredTxns2 {
+		numRecoveredUpdates += len(txn.Updates)
+	}
+	if numRecoveredUpdates != numUpdates {
+		t.Errorf("There should be %v updates but there were %v", numUpdates, numRecoveredUpdates)
 	}
 
 	// Signal that the recovery is complete
-	if err := w.RecoveryComplete(); err != nil {
-		t.Errorf("Failed to signal completed recovery: %v", err)
+	for _, txn := range recoveredTxns2 {
+		if err := txn.SignalUpdatesApplied(); err != nil {
+			t.Errorf("Failed to signal applied updates: %v", err)
+		}
 	}
 
 	// Restart the wal again
 	if err := w.Close(); err != nil {
 		t.Errorf("Failed to close wal: %v", err)
 	}
-	updates3, w, err := New(wt.path)
+	recoveredTxns3, w, err := New(wt.path)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// There should be 0 updates this time
-	if len(updates3) != 0 {
-		t.Errorf("There should be %v updates but there were %v", 0, len(updates3))
+	if len(recoveredTxns3) != 0 {
+		t.Errorf("There should be %v updates but there were %v", 0, len(recoveredTxns3))
 	}
 	// The metadata should say "unclean"
 	mdData := make([]byte, pageSize)
@@ -798,16 +806,16 @@ func TestTransactionAppend(t *testing.T) {
 	// shutdown the wal
 	wt.Close()
 
-	// Restart it and check if exactly 2 unfinished transactions is reported
-	updates2, w, err := New(wt.path)
+	// Restart it and check if exactly 2 unfinished transactions are reported
+	recoveredTxns2, w, err := New(wt.path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer w.Close()
 
-	if len(updates2) != len(updates)*2 {
+	if len(recoveredTxns2[0].Updates) != len(updates)*2 {
 		t.Errorf("Number of updates after restart didn't match. Expected %v, but was %v",
-			len(updates)*2, len(updates2))
+			len(updates)*2, len(recoveredTxns2[0].Updates))
 	}
 }
 

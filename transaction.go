@@ -499,9 +499,6 @@ func (t *Transaction) writePage(page *page) error {
 
 // NewTransaction creates a transaction from a set of updates.
 func (w *WAL) NewTransaction(updates []Update) (*Transaction, error) {
-	if !w.recoveryComplete {
-		return nil, errors.New("can't call NewTransaction before recovery is complete")
-	}
 	// Check that there are updates for the transaction to process.
 	if len(updates) == 0 {
 		return nil, errors.New("cannot create a transaction without updates")

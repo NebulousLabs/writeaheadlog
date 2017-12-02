@@ -45,7 +45,6 @@ const (
 	recoveryStateInvalid = iota
 	recoveryStateClean
 	recoveryStateUnclean
-	recoveryStateWipe
 )
 
 var (
