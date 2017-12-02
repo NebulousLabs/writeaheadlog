@@ -378,7 +378,7 @@ func verifyNumbers(numbers []uint32) error {
 
 // recoverSiloWAL recovers the WAL after a crash. This will be called
 // repeatedly until it finishes.
-func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]*silo, testdir string, file file, numSilos int64, numIncrease int) (numSkipped int, err error) {
+func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]*silo, testdir string, file file, numSilos int64, numIncrease int) (numSkipped int64, err error) {
 	// Reload wal.
 	recoveredTxns, wal, err := newWal(walPath, deps)
 	if err != nil {
@@ -393,8 +393,8 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 	// Unmarshal updates and apply them
 	var appliedTxns []*Transaction
 	for _, txn := range recoveredTxns {
-		// 10% chance to skip transaction
-		skipTxn := fastrand.Intn(10) == 0
+		// 20% chance to skip transaction
+		skipTxn := fastrand.Intn(5) == 0
 		for _, update := range txn.Updates {
 			var su siloUpdate
 			su.unmarshal(update.Instructions)
@@ -455,15 +455,21 @@ func recoverSiloWAL(walPath string, deps *dependencyFaultyDisk, silos map[int64]
 	}
 
 	// Close the wal
-	if err := wal.Close(); err != nil {
+	var openTxns int64
+	if openTxns, err = wal.CloseIncomplete(); err != nil {
 		return 0, errors.Extend(errors.New("Failed to close WAL"), err)
 	}
-	return len(recoveredTxns) - len(appliedTxns), nil
+
+	// Sanity check open transactions
+	if int64(len(recoveredTxns)-len(appliedTxns)) != openTxns {
+		panic("Number of skipped txns doesn't match number of open txns")
+	}
+	return openTxns, nil
 }
 
 // newSiloDatabase will create a silo database that overwrites any existing
 // silo database.
-func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, dataPath string, numSilos int64, numIncrease int, numSkipped int) (map[int64]*silo, *WAL, file, error) {
+func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, dataPath string, numSilos int64, numIncrease int, numSkipped int64) (map[int64]*silo, *WAL, file, error) {
 	// Create the database file.
 	file, err := deps.create(dbPath)
 	if err != nil {
@@ -475,7 +481,7 @@ func newSiloDatabase(deps *dependencyFaultyDisk, dbPath, walPath string, dataPat
 		return nil, nil, nil, err
 	}
 	// The wal might contain skipped transactions. Apply them.
-	if len(recoveredTxns) != numSkipped {
+	if int64(len(recoveredTxns)) != numSkipped {
 		return nil, nil, nil, fmt.Errorf("Expected %v txns but was %v", numSkipped, len(recoveredTxns))
 	}
 	for _, txn := range recoveredTxns {
@@ -534,8 +540,8 @@ func TestSilo(t *testing.T) {
 	i := 0
 	maxRetries := 0
 	totalRetries := 0
-	numSkipped := 0
-	totalSkipped := 0
+	numSkipped := int64(0)
+	totalSkipped := int64(0)
 	for i = 0; i < maxIters; i++ {
 		if time.Now().After(endTime) {
 			// Stop if test takes too long
@@ -560,7 +566,7 @@ func TestSilo(t *testing.T) {
 			// Resume with existing database.
 			var recoveredTxns []*Transaction
 			recoveredTxns, wal, err = newWal(walPath, deps)
-			if len(recoveredTxns) != numSkipped || err != nil {
+			if int64(len(recoveredTxns)) != numSkipped || err != nil {
 				t.Fatal(recoveredTxns, err)
 			}
 		}
@@ -627,6 +633,6 @@ func TestSilo(t *testing.T) {
 	t.Logf("Number of iterations: %v", i)
 	t.Logf("Max number of retries: %v", maxRetries)
 	t.Logf("Average number of retries: %v", totalRetries/i)
-	t.Logf("Average number of skipped txns: %v", totalSkipped/i)
+	t.Logf("Average number of skipped txns: %v", float64(totalSkipped)/float64(i))
 	t.Logf("WAL size: %v bytes", fi.Size())
 }
