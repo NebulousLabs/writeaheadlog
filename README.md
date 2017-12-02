@@ -26,7 +26,9 @@ if len(updates) != 0 {
 	applyUpdates(recoveredTxns)
 
 	// After the recovery is complete we can signal the WAL that we are
-	// done that the updates were applied.
+	// done and that the updates were applied.
+	// NOTE: This is optional. If for some reason an update cannot be
+	// applied right away it may be skipped and applied later
 	for _, txn := range recoveredTxns {
 		if err := txn.SignalUpdatesApplied; err != nil {
 			return err
