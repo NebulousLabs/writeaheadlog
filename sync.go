@@ -6,6 +6,7 @@ package writeaheadlog
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -44,6 +45,12 @@ func (w *WAL) threadedSync() {
 		// all waiting threads that the sync has completed.
 		oldSS.err = w.logFile.Sync()
 		oldSS.rwMu.Unlock()
+
+		// Add a sleep to allow for more efficient batching of syncs. This
+		// drastically improves the multithreaded performance on Windows while
+		// slightly decreasing the singlethreaded performance. Unfortunately it
+		// slightly decreases the overall performance on Linux and Mac OS.
+		time.Sleep(time.Microsecond)
 	}
 }
 
