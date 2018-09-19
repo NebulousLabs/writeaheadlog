@@ -20,7 +20,7 @@ if err != nil {
 	return err
 }
 
-if len(updates) != 0 {
+if len(recoveredTxns) != 0 {
 	// Apparently the system crashed. Handle the unfinished updates
 	// accordingly.
 	applyUpdates(recoveredTxns)
